@@ -372,7 +372,9 @@ object `package` extends RootModule { root =>
         L.zio.zio,
         L.zio.streams,
         L.zio.jdbc,
-        L.jdbc.postgres
+        L.jdbc.postgres,
+        L.commons.text,
+        L.ujson
       )
 
       override def moduleDeps = Seq(

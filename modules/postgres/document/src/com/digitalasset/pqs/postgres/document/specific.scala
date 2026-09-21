@@ -7,24 +7,18 @@ import com.digitalasset.canonical
 import com.digitalasset.canonical.specific.{EventId, NodeId, Offset}
 import com.digitalasset.canonical.{ContractId, DomainId, Party}
 import com.digitalasset.pqs.postgres.backend.IdPlaceholder
+import com.digitalasset.pqs.postgres.backend.encoding.ValueConverter
 import com.digitalasset.pqs.postgres.document.model
-import com.digitalasset.pqs.postgres.document.model.given
+import com.digitalasset.pqs.postgres.document.model.{toSqlValue, given}
 import com.digitalasset.transcode.schema.ChoiceName
 import ujson.Value
 import zio.config.magnolia.Descriptor
-import zio.jdbc.JdbcDecoder
 
 import java.time.{Instant, ZonedDateTime}
 import scala.util.Try
 
 object specific:
-  trait ValueConverter[A] { def convert(value: A): String }
-
   given eventIdConverter: ValueConverter[EventId] = value => value.toString
-
-  implicit val offsetEncoder: JdbcDecoder[Offset] = (ix, rs) => (ix, Offset.Absolute(rs.getLong(ix)))
-
-  extension (offset: Offset) def toSqlValue: Long = offset.toLongOffset
 
   sealed trait PruningBoundary
   object PruningBoundary:

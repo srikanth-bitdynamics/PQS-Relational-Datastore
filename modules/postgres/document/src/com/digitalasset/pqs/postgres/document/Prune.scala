@@ -5,6 +5,7 @@ package com.digitalasset.pqs.postgres.document
 
 import com.digitalasset.canonical.specific.Offset
 import com.digitalasset.pqs.configuration
+import com.digitalasset.pqs.postgres.document.model.toSqlValue
 import com.digitalasset.pqs.postgres.document.specific.*
 import com.digitalasset.pqs.postgres.document.specific.PruningBoundary.*
 import zio.Console.printLine

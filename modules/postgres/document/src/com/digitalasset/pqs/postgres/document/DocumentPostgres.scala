@@ -48,7 +48,7 @@ final case class DocumentPostgres(
     packageMap: Map[PackageId, PackagePk],
     placeholders: IdPlaceholder.Factory
 ) extends Datastore:
-  import com.digitalasset.pqs.postgres.document.specific.offsetEncoder
+  import com.digitalasset.pqs.postgres.document.model.{offsetEncoder, toSqlValue}
 
   private val Genesis: Datastore.Checkpoint = (Offset.Genesis, 0L)
   private val env                           = ZEnvironment(pool) ++ ZEnvironment(poolConfig)
@@ -107,7 +107,12 @@ final case class DocumentPostgres(
       .mapChunksZIO(chunk =>
         ZIO.whenCase(chunk.headOption) {
           case Some(Offset.Genesis) =>
-            tx(model.Model.prepareStatement(Chunk(model.Transaction(specific.Transaction(Genesis._2, Genesis._1)))))
+            tx(
+              model.Model.prepareStatement(
+                Chunk(model.Transaction(specific.Transaction(Genesis._2, Genesis._1))),
+                model.statTables
+              )
+            )
               .as(Chunk.empty)
         } *> ZIO.attempt {
           chunk.collect {
@@ -171,7 +176,7 @@ final case class DocumentPostgres(
         val onlyTxs = models.onlyTransactions()
         ZIO.attempt {
           traces.span("execute batch") {
-            model.Model.prepareStatement(models)
+            model.Model.prepareStatement(models, model.statTables)
               @@ trackExecute
               @@ traces.attributes("pqs.batch.models_count" -> models.length.toLong)
               <* ZIO.foreachDiscard(onlyTxs) { tx =>

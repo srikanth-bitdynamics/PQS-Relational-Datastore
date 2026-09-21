@@ -4,20 +4,13 @@ import com.digitalasset.canonical.specific.{NodeId, Offset}
 import com.digitalasset.canonical.{ContractId, Party}
 import com.digitalasset.pqs.postgres.backend.IdPlaceholder
 import com.digitalasset.pqs.postgres.relational.model
-import com.digitalasset.pqs.postgres.relational.model.given
+import com.digitalasset.pqs.postgres.relational.model.{toSqlValue, given}
 import com.digitalasset.transcode.schema.ChoiceName
 import ujson.Value
-import zio.jdbc.JdbcDecoder
 
 import java.time.Instant
 
 object specific:
-  trait ValueConverter[A] { def convert(value: A): String }
-
-  implicit val offsetEncoder: JdbcDecoder[Offset] = (ix, rs) => (ix, Offset.Absolute(rs.getLong(ix)))
-
-  extension (offset: Offset) def toSqlValue: Long = offset.toLongOffset
-
   type EntityTypePk = Long
 
   final class Transaction(

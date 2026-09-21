@@ -34,7 +34,7 @@ final case class RelationalPostgres(
     isTemplate: Identifier => Boolean,
     placeholders: IdPlaceholder.Factory
 ) extends Datastore:
-  import com.digitalasset.pqs.postgres.relational.specific.{offsetEncoder, toSqlValue}
+  import com.digitalasset.pqs.postgres.relational.model.{offsetEncoder, toSqlValue}
 
   private val Genesis: Datastore.Checkpoint = (Offset.Genesis, 0L)
   private val env                           = ZEnvironment(pool) ++ ZEnvironment(config) ++ ZEnvironment(poolConfig)
@@ -122,7 +122,8 @@ final case class RelationalPostgres(
                   model.Transaction(
                     specific.Transaction(Genesis._2, Offset.Genesis, None, None, None, None, None, None)
                   )
-                )
+                ),
+                model.statTables
               )
             ).as(Chunk.empty)
         } *> ZIO.attempt {
@@ -185,7 +186,7 @@ final case class RelationalPostgres(
         val onlyTxs = models.onlyTransactions()
         ZIO.attempt {
           traces.span("execute batch") {
-            model.Model.prepareStatement(models)
+            model.Model.prepareStatement(models, model.statTables)
               @@ trackExecute
               @@ traces.attributes("pqs.batch.models_count" -> models.length.toLong)
               <* ZIO.foreachDiscard(onlyTxs) { tx =>
