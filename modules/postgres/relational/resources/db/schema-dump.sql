@@ -205,9 +205,10 @@ CREATE FUNCTION pqs_relational.__rel_current_writer() RETURNS text
 
 CREATE PROCEDURE pqs_relational.__rel_delete_transactions_after(IN cutoff_ix bigint)
     LANGUAGE plpgsql
-    AS $$
+    AS $_$
 declare
     work_exists boolean;
+    tbl         text;
 begin
     select exists(select 1 from __rel_transactions where tx_ix > cutoff_ix) into work_exists;
     if work_exists then
@@ -220,6 +221,18 @@ begin
         delete from __query_events where tx_ix > cutoff_ix;
         delete from __rel_contract_visibility
         where contract_pk in (select contract_pk from __rel_contracts where created_tx_ix > cutoff_ix);
+        for tbl in
+            select distinct e.base_table
+            from __rel_contracts c
+            join __rel_entity e on e.pk = c.template_entity_pk
+            where c.archived_tx_ix > cutoff_ix and c.created_tx_ix <= cutoff_ix and e.base_table is not null
+        loop
+            execute format(
+                'update %I p set archived_tx_ix = null
+                 from __rel_contracts c
+                 where p.contract_pk = c.contract_pk and c.archived_tx_ix > $1', tbl
+            ) using cutoff_ix;
+        end loop;
         update __rel_contracts set archived_tx_ix = null, archived_at_offset = null where archived_tx_ix > cutoff_ix;
         delete from __rel_contracts where created_tx_ix > cutoff_ix;
         delete from __rel_tmp_lifecycle where archived_tx_ix > cutoff_ix;
@@ -227,7 +240,7 @@ begin
         delete from __rel_transactions where tx_ix > cutoff_ix;
     end if;
 end;
-$$;
+$_$;
 
 
 --

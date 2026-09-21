@@ -205,6 +205,34 @@ object ContractObservationSpec extends FuncTest[Postgres]:
           )
         yield assertTrue(failed.isLeft, after.contains((0L, 0L)), recovered.contains((2L, 2L)))
     },
+    funcTest("recovery resets the materialised archive boundary with the canonical one") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup
+          _ <- write(observation(1, 1, model.SourceKind.Stream))
+          _ <- transact(
+            sql"""insert into __rel_tmp_lifecycle(contract_id, archived_tx_ix, archived_at_offset)
+                  values ('contract', 3, 30)""".execute
+          )
+          _ <- transact(sql"update __rel_watermark set tx_ix=3, ledger_offset=30".execute)
+          archived <- transact(
+            sql"""select p.archived_tx_ix, c.archived_tx_ix from payload p
+                  join __rel_contracts c using (contract_pk)""".query[(Long, Long)].selectOne
+          )
+          _ <- transact(sql"call __rel_delete_transactions_after(2)".execute)
+          reset <- transact(
+            sql"""select p.archived_tx_ix is null, c.archived_tx_ix is null from payload p
+                  join __rel_contracts c using (contract_pk)""".query[(Boolean, Boolean)].selectOne
+          )
+          diverged <- transact(
+            sql"""select count(*) from payload p join __rel_contracts c using (contract_pk)
+                  where p.created_tx_ix is distinct from c.created_tx_ix
+                     or p.archived_tx_ix is distinct from c.archived_tx_ix""".query[Long].selectOne
+          )
+        yield assertTrue(archived.contains((3L, 3L)), reset.contains((true, true)), diverged.contains(0L))
+    },
     funcTest("a delayed exercise cannot restore a redacted contract payload") {
       Given:
         Postgres.database >+> ProductionPool.layer()
