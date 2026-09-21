@@ -96,6 +96,7 @@ object ProjectionRegistry:
               "cannot activate projection: a relational ingest writer is live; stop the writer, then re-run activate"
             )
           )
+      _ <- ensureBackfilled(version)
       _ <- sql"update __query_projection set status = 'retired' where status = 'active'".update
       updated <- sql"""update __query_projection set status = 'active', activated_at = now()
                        where projection_version = $version and status = 'draft'""".update
@@ -105,6 +106,28 @@ object ProjectionRegistry:
           ZIO.fail(
             new RuntimeException(
               s"cannot activate projection version $version: no draft version with that id is pending activation"
+            )
+          )
+      shapeJson <- resolvedShapeOf(version)
+      _         <- QueryViews.publish(shapeJson.fold(Map.empty)(ProjectionBinding.parse))
+    yield ()
+
+  private def ensureBackfilled(version: Long): ZIO[ZConnection, Throwable, Unit] =
+    for
+      row       <- get(version)
+      watermark <- sql"select tx_ix from latest_checkpoint()".query[Long].selectOne.map(_.getOrElse(0L))
+      _ <- row.flatMap(_.backfilledThroughIx) match
+        case Some(through) if through >= watermark => ZIO.unit
+        case Some(through) =>
+          ZIO.fail(
+            new RuntimeException(
+              s"cannot activate projection version $version: backfilled through tx_ix $through but the watermark is $watermark; run backfill first"
+            )
+          )
+        case None =>
+          ZIO.fail(
+            new RuntimeException(
+              s"cannot activate projection version $version: not backfilled through the current watermark; run backfill first"
             )
           )
     yield ()

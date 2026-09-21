@@ -32,6 +32,16 @@ object ProjectionBackfill:
       _ <- ZIO.foreachDiscard(shapes.values.toSeq)(shape => backfillLineage(codec, shape, through, version, chunkSize))
     yield through
 
+  def runAndPublish(
+      schema: Schema,
+      shapes: Map[String, Shape.ResolvedShape],
+      version: Long,
+      chunkSize: Int = ChunkSize
+  ): ZIO[ZConnection, Throwable, Long] =
+    run(schema, shapes, version, chunkSize).flatMap(through =>
+      ProjectionRegistry.setBackfilledThrough(version, through).as(through)
+    )
+
   private def readEncoding: ZIO[ZConnection, Throwable, (Boolean, Boolean, Boolean)] =
     sql"select numeric_as_string, int64_as_string, exclude_nulls from __rel_encoding limit 1"
       .query[(Boolean, Boolean, Boolean)]

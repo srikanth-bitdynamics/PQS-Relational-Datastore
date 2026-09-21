@@ -75,6 +75,7 @@ $$
 declare
     entity bigint;
     tbl    text;
+    qview  text;
 begin
     select pk from __rel_entity e
     where e.package_name = __rel_initialize_entity.package_name
@@ -84,8 +85,9 @@ begin
     into entity;
     if entity is null then
         tbl := __rel_typed_table_name(package_name, module_name, entity_name, kind);
-        insert into __rel_entity(package_name, module_name, entity_name, kind, base_table)
-        values (package_name, module_name, entity_name, kind, tbl);
+        qview := case when kind = 'template' then 'q_' || substring(tbl from 5) end;
+        insert into __rel_entity(package_name, module_name, entity_name, kind, base_table, query_view)
+        values (package_name, module_name, entity_name, kind, tbl, qview);
         if kind = 'template' then
             execute format(
                 'create table if not exists %I (
@@ -188,8 +190,11 @@ begin
         raise exception 'relational entity %:%:% (%) is not initialized; run schema apply first',
             package_name, module_name, entity_name, kind;
     end if;
-    if col in ('contract_pk', 'payload_json', 'view_json', 'metadata') then
-        raise exception 'projection column % collides with a reserved base column of %', col, tbl;
+    if col in ('contract_pk', 'payload_json', 'view_json', 'metadata',
+               'contract_id', 'representative_package_id', 'creation_package_id',
+               'created_tx_ix', 'created_at_offset', 'creation_synchronizer_id',
+               'signatories', 'observers') then
+        raise exception 'projection column % collides with a reserved base or query-view column of %', col, tbl;
     end if;
     select case data_type
                when 'numeric' then format('numeric(%s, %s)', numeric_precision, numeric_scale)

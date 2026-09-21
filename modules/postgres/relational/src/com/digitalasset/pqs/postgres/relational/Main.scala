@@ -164,8 +164,7 @@ object Main extends ComposableApp:
             for
               shapeJson <- ProjectionRegistry.resolvedShapeOf(version)
               shapes = shapeJson.fold(Map.empty[String, Shape.ResolvedShape])(ProjectionBinding.parse)
-              through <- ProjectionBackfill.run(schema, shapes, version)
-              _       <- ProjectionRegistry.setBackfilledThrough(version, through)
+              through <- ProjectionBackfill.runAndPublish(schema, shapes, version)
             yield s"Backfilled projection version $version through tx_ix $through"
         }
       )
@@ -188,17 +187,7 @@ object Main extends ComposableApp:
       ProjectionRegistry.latestDraft.flatMap {
         case None => printLine("No draft projection to activate")
         case Some(version) =>
-          for
-            row       <- ProjectionRegistry.get(version)
-            watermark <- sql"select tx_ix from latest_checkpoint()".query[Long].selectOne.map(_.getOrElse(0L))
-            _ <- row.flatMap(_.backfilledThroughIx) match
-              case Some(through) if through >= watermark =>
-                ProjectionRegistry.activate(version) *> printLine(s"Activated projection version $version")
-              case _ =>
-                printLine(
-                  s"Projection version $version is not backfilled through the current watermark ($watermark); run backfill first"
-                )
-          yield ()
+          ProjectionRegistry.activate(version) *> printLine(s"Activated projection version $version")
       }
     )
 

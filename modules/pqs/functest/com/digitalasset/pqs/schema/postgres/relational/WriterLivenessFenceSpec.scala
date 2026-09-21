@@ -53,8 +53,13 @@ object WriterLivenessFenceSpec extends SharedLedgerAndPostgresTest:
       Then:
         for
           version <- Postgres.query(
-            sql"set search_path to pqs_relational".execute *>
-              ProjectionRegistry.insertDraft(ujson.Obj(), "hash-live", ujson.Obj(), 1)
+            sql"set search_path to pqs_relational".execute *> (
+              for
+                v         <- ProjectionRegistry.insertDraft(ujson.Obj(), "hash-live", ujson.Obj(), 1)
+                watermark <- sql"select tx_ix from latest_checkpoint()".query[Long].selectOne.map(_.getOrElse(0L))
+                _         <- ProjectionRegistry.setBackfilledThrough(v, watermark)
+              yield v
+            )
           )
           held <- ZIO.serviceWithZIO[Database] { db =>
             ZIO.scoped {
