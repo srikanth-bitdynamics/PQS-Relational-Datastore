@@ -111,13 +111,24 @@ object RelationalQueryViewSpec extends SharedLedgerAndPostgresTest:
                 .selectAll
             _             <- sql"select set_latest($archivedOffset)".query[Long].selectOne
             archivedCount <- SqlFragment(s"select count(*) from ${view}").query[Long].selectOne.map(_.getOrElse(-1L))
+            base          <- RelationalQueries.baseTableOf("Note")
+            diverged <- SqlFragment(
+              s"""select count(*) from ${base} p join __rel_contracts c using (contract_pk)
+                  where p.created_tx_ix is distinct from c.created_tx_ix
+                     or p.archived_tx_ix is distinct from c.archived_tx_ix"""
+            ).query[Long].selectOne.map(_.getOrElse(-1L))
+            lifecycle <- SqlFragment(
+              s"select count(*) from ${base} where created_tx_ix is not null and archived_tx_ix is not null"
+            ).query[Long].selectOne.map(_.getOrElse(-1L))
           yield activeRows match
             case Seq((owner, body, payload)) =>
               assertTrue(
                 owner.exists(_.startsWith("Alice")),
                 body.contains("hello"),
                 payload.exists(_.contains("hello")),
-                archivedCount == 0L
+                archivedCount == 0L,
+                diverged == 0L,
+                lifecycle == 1L
               )
             case _ => assertTrue(false)
         )

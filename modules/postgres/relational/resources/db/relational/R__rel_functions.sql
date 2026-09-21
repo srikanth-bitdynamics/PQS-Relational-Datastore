@@ -94,8 +94,10 @@ begin
         if kind = 'template' then
             execute format(
                 'create table if not exists %I (
-                     contract_pk  bigint primary key references __rel_contracts (contract_pk) on delete cascade,
-                     payload_json jsonb not null)',
+                     contract_pk    bigint primary key references __rel_contracts (contract_pk) on delete cascade,
+                     created_tx_ix  bigint not null,
+                     archived_tx_ix bigint,
+                     payload_json   jsonb not null)',
                 tbl
             );
         else
@@ -195,7 +197,7 @@ begin
     end if;
     if col in ('contract_pk', 'payload_json', 'view_json', 'metadata',
                'contract_id', 'representative_package_id', 'creation_package_id',
-               'created_tx_ix', 'created_at_offset', 'creation_synchronizer_id',
+               'created_tx_ix', 'archived_tx_ix', 'created_at_offset', 'creation_synchronizer_id',
                'signatories', 'observers') then
         raise exception 'projection column % collides with a reserved base or query-view column of %', col, tbl;
     end if;
@@ -212,6 +214,37 @@ begin
     elsif existing <> coltype then
         raise exception 'projection column %.% is % but the projection expects %', tbl, col, existing, coltype;
     end if;
+end
+$$ language plpgsql;
+
+create or replace procedure __rel_apply_observation_bounds(p_bounds jsonb) as
+$$
+declare
+    tbl text;
+begin
+    update __rel_contracts c
+    set created_tx_ix = b.tx_ix, created_at_offset = b.ledger_offset,
+        source_kind = b.source::rel_source_kind, history_lower_bound = b.lower_bound,
+        creation_synchronizer_id = b.synchronizer
+    from jsonb_to_recordset(p_bounds) as b(contract_id text, tx_ix bigint, ledger_offset bigint,
+        source text, lower_bound boolean, synchronizer text)
+    where c.contract_id = b.contract_id and c.created_tx_ix > b.tx_ix;
+
+    for tbl in
+        select distinct e.base_table
+        from jsonb_to_recordset(p_bounds) as b(contract_id text)
+        join __rel_contracts c on c.contract_id = b.contract_id
+        join __rel_entity e on e.pk = c.template_entity_pk
+        where e.base_table is not null
+    loop
+        execute format(
+            'update %I p set created_tx_ix = c.created_tx_ix
+             from __rel_contracts c
+             join jsonb_to_recordset($1) as b(contract_id text) on b.contract_id = c.contract_id
+             where p.contract_pk = c.contract_pk and p.created_tx_ix is distinct from c.created_tx_ix',
+            tbl
+        ) using p_bounds;
+    end loop;
 end
 $$ language plpgsql;
 

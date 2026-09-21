@@ -1,6 +1,3 @@
--- Copyright (c) 2026 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
--- SPDX-License-Identifier: Apache-2.0
-
 --
 -- PostgreSQL database dump
 --
@@ -118,6 +115,43 @@ CREATE TYPE pqs_relational.rel_visibility_role AS ENUM (
     'observer',
     'witness'
 );
+
+
+--
+-- Name: __rel_apply_observation_bounds(jsonb); Type: PROCEDURE; Schema: pqs_relational; Owner: -
+--
+
+CREATE PROCEDURE pqs_relational.__rel_apply_observation_bounds(IN p_bounds jsonb)
+    LANGUAGE plpgsql
+    AS $_$
+declare
+    tbl text;
+begin
+    update __rel_contracts c
+    set created_tx_ix = b.tx_ix, created_at_offset = b.ledger_offset,
+        source_kind = b.source::rel_source_kind, history_lower_bound = b.lower_bound,
+        creation_synchronizer_id = b.synchronizer
+    from jsonb_to_recordset(p_bounds) as b(contract_id text, tx_ix bigint, ledger_offset bigint,
+        source text, lower_bound boolean, synchronizer text)
+    where c.contract_id = b.contract_id and c.created_tx_ix > b.tx_ix;
+
+    for tbl in
+        select distinct e.base_table
+        from jsonb_to_recordset(p_bounds) as b(contract_id text)
+        join __rel_contracts c on c.contract_id = b.contract_id
+        join __rel_entity e on e.pk = c.template_entity_pk
+        where e.base_table is not null
+    loop
+        execute format(
+            'update %I p set created_tx_ix = c.created_tx_ix
+             from __rel_contracts c
+             join jsonb_to_recordset($1) as b(contract_id text) on b.contract_id = c.contract_id
+             where p.contract_pk = c.contract_pk and p.created_tx_ix is distinct from c.created_tx_ix',
+            tbl
+        ) using p_bounds;
+    end loop;
+end
+$_$;
 
 
 --
@@ -271,8 +305,10 @@ begin
         if kind = 'template' then
             execute format(
                 'create table if not exists %I (
-                     contract_pk  bigint primary key references __rel_contracts (contract_pk) on delete cascade,
-                     payload_json jsonb not null)',
+                     contract_pk    bigint primary key references __rel_contracts (contract_pk) on delete cascade,
+                     created_tx_ix  bigint not null,
+                     archived_tx_ix bigint,
+                     payload_json   jsonb not null)',
                 tbl
             );
         else
@@ -389,7 +425,7 @@ begin
     end if;
     if col in ('contract_pk', 'payload_json', 'view_json', 'metadata',
                'contract_id', 'representative_package_id', 'creation_package_id',
-               'created_tx_ix', 'created_at_offset', 'creation_synchronizer_id',
+               'created_tx_ix', 'archived_tx_ix', 'created_at_offset', 'creation_synchronizer_id',
                'signatories', 'observers') then
         raise exception 'projection column % collides with a reserved base or query-view column of %', col, tbl;
     end if;
@@ -531,7 +567,9 @@ $$;
 
 CREATE FUNCTION pqs_relational.__rel_update_watermark_fn() RETURNS trigger
     LANGUAGE plpgsql
-    AS $$
+    AS $_$
+declare
+    tbl text;
 begin
     -- Bypass the writer check when instance_id is being updated explicitly, so a writer reset can invalidate its predecessor.
     if new.instance_id = old.instance_id then
@@ -553,6 +591,23 @@ begin
     where c.contract_id = d.contract_id and c.created_tx_ix <= new.tx_ix
       and (c.archived_tx_ix is null or d.archived_tx_ix < c.archived_tx_ix);
 
+    for tbl in
+        select distinct e.base_table
+        from __rel_tmp_lifecycle d
+        join __rel_contracts c on c.contract_id = d.contract_id
+        join __rel_entity e on e.pk = c.template_entity_pk
+        where d.archived_tx_ix <= new.tx_ix and c.created_tx_ix <= new.tx_ix and e.base_table is not null
+    loop
+        execute format(
+            'update %I p set archived_tx_ix = c.archived_tx_ix
+             from __rel_contracts c
+             join __rel_tmp_lifecycle d on d.contract_id = c.contract_id
+             where p.contract_pk = c.contract_pk and d.archived_tx_ix <= $1 and c.created_tx_ix <= $1
+               and p.archived_tx_ix is distinct from c.archived_tx_ix',
+            tbl
+        ) using new.tx_ix;
+    end loop;
+
     delete from __rel_tmp_lifecycle d
     using __rel_contracts c
     where c.contract_id = d.contract_id and c.created_tx_ix <= new.tx_ix and d.archived_tx_ix <= new.tx_ix;
@@ -570,7 +625,7 @@ begin
 
     return new;
 end;
-$$;
+$_$;
 
 
 --
@@ -893,6 +948,7 @@ CREATE TABLE pqs_relational.__query_projection (
     projection_version bigint NOT NULL,
     definition jsonb NOT NULL,
     definition_hash text NOT NULL,
+    shape_hash text NOT NULL,
     resolved_shape jsonb NOT NULL,
     layout smallint NOT NULL,
     status pqs_relational.rel_projection_status NOT NULL,
@@ -907,7 +963,7 @@ CREATE TABLE pqs_relational.__query_projection (
 --
 
 CREATE TABLE pqs_relational.__rel_backfill_progress (
-    projection_version bigint NOT NULL,
+    shape_hash text NOT NULL,
     qualified text NOT NULL,
     cursor_tx_ix bigint DEFAULT '-1'::integer NOT NULL,
     cursor_pk bigint DEFAULT 0 NOT NULL,
@@ -1272,7 +1328,7 @@ CREATE VIEW pqs_relational.active_contracts AS
     observers,
     creation_synchronizer_id
    FROM pqs_relational.__rel_contracts c
-  WHERE ((life_ix @> pqs_relational.latest_ix()) AND (NOT divulged_only) AND (redaction_id IS NULL));
+  WHERE ((life_ix @> ( SELECT pqs_relational.latest_ix() AS latest_ix)) AND (NOT divulged_only) AND (redaction_id IS NULL));
 
 
 --
@@ -1311,7 +1367,7 @@ CREATE VIEW pqs_relational.reassignments AS
     r.assignment_exclusivity
    FROM (pqs_relational.__query_events e
      JOIN pqs_relational.__rel_reassignments r USING (event_pk))
-  WHERE ((e.ledger_offset >= pqs_relational.oldest_offset()) AND (e.ledger_offset <= pqs_relational.latest_offset()));
+  WHERE ((e.ledger_offset >= ( SELECT pqs_relational.oldest_offset() AS oldest_offset)) AND (e.ledger_offset <= ( SELECT pqs_relational.latest_offset() AS latest_offset)));
 
 
 --
@@ -1320,6 +1376,8 @@ CREATE VIEW pqs_relational.reassignments AS
 
 CREATE TABLE pqs_relational.rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb40345 (
     contract_pk bigint NOT NULL,
+    created_tx_ix bigint NOT NULL,
+    archived_tx_ix bigint,
     payload_json jsonb NOT NULL
 );
 
@@ -1338,7 +1396,7 @@ CREATE VIEW pqs_relational.transactions AS
     external_transaction_hash,
     paid_traffic_cost
    FROM pqs_relational.__rel_transactions t
-  WHERE ((ledger_offset >= pqs_relational.oldest_offset()) AND (ledger_offset <= pqs_relational.latest_offset()));
+  WHERE ((ledger_offset >= ( SELECT pqs_relational.oldest_offset() AS oldest_offset)) AND (ledger_offset <= ( SELECT pqs_relational.latest_offset() AS latest_offset)));
 
 
 --
@@ -1428,7 +1486,7 @@ ALTER TABLE ONLY pqs_relational.__query_projection
 --
 
 ALTER TABLE ONLY pqs_relational.__rel_backfill_progress
-    ADD CONSTRAINT __rel_backfill_progress_pkey PRIMARY KEY (projection_version, qualified);
+    ADD CONSTRAINT __rel_backfill_progress_pkey PRIMARY KEY (shape_hash, qualified);
 
 
 --
@@ -1749,14 +1807,6 @@ CREATE TRIGGER __rel_update_watermark_trg BEFORE UPDATE OF tx_ix ON pqs_relation
 
 ALTER TABLE ONLY pqs_relational.__query_events
     ADD CONSTRAINT __query_events_template_entity_pk_fkey FOREIGN KEY (template_entity_pk) REFERENCES pqs_relational.__rel_entity(pk);
-
-
---
--- Name: __rel_backfill_progress __rel_backfill_progress_projection_version_fkey; Type: FK CONSTRAINT; Schema: pqs_relational; Owner: -
---
-
-ALTER TABLE ONLY pqs_relational.__rel_backfill_progress
-    ADD CONSTRAINT __rel_backfill_progress_projection_version_fkey FOREIGN KEY (projection_version) REFERENCES pqs_relational.__query_projection(projection_version);
 
 
 --
