@@ -3,6 +3,7 @@
 
 package com.digitalasset.pqs.postgres.relational.projection
 
+import com.digitalasset.pqs.postgres.relational.WriterFence
 import com.digitalasset.transcode.schema.Schema
 import ujson.Value
 import zio.ZIO
@@ -67,16 +68,26 @@ object ProjectionApply:
       "layout"     -> ujson.Num(layout)
     )
     val hash = ProjectionDefinition.canonicalHash(hashInput)
+    val physicalShape = ujson.Obj.from(
+      columns
+        .groupBy(_.lineage.qualified)
+        .toSeq
+        .sortBy(_._1)
+        .map((qualified, planned) =>
+          (qualified, ujson.Arr.from(planned.map(_.field).distinctBy(_.name).sortBy(_.name).map(colJson)): Value)
+        )
+    )
     val shapeHash =
-      ProjectionDefinition.canonicalHash(ujson.Obj("shape" -> resolvedShape, "layout" -> ujson.Num(layout)))
+      ProjectionDefinition.canonicalHash(ujson.Obj("shape" -> physicalShape, "layout" -> ujson.Num(layout)))
     Plan(definition, resolvedShape, hash, shapeHash, columns, diagnostics, errors)
 
   def apply(config: Map[String, ProjectionDefinition], schema: Schema): ZIO[ZConnection, Throwable, Outcome] =
     val p = plan(config, schema)
     if p.errors.nonEmpty then ZIO.fail(new RuntimeException(s"projection apply failed: ${p.errors.mkString("; ")}"))
     else
-      sql"set local lock_timeout = '30s'".execute *>
-        sql"select 1 from pg_advisory_xact_lock(${ProjectionRegistry.projectionLockKey})".query[Int].selectOne *>
+      sql"select 1 from pg_advisory_xact_lock(${ProjectionRegistry.projectionLockKey})".query[Int].selectOne *>
+        requireWriterStopped *>
+        WriterFence.drain *>
         ProjectionRegistry.getByHash(p.hash).flatMap {
           case Some(row) => ZIO.succeed(Outcome.AlreadyApplied(row.version, p.diagnostics))
           case None =>
@@ -86,6 +97,21 @@ object ProjectionApply:
                 .insertDraft(p.definition, p.hash, p.shapeHash, p.resolvedShape, layout)
                 .map(version => Outcome.Applied(version, p.columns.size, p.diagnostics))
         }
+
+  private val requireWriterStopped: ZIO[ZConnection, Throwable, Unit] =
+    sql"select case when pg_try_advisory_xact_lock(${ProjectionRegistry.writerLockKey}) then 1 else 0 end"
+      .query[Int]
+      .selectOne
+      .map(_.getOrElse(0))
+      .flatMap(_.compareTo(1) match
+        case 0 => ZIO.unit
+        case _ =>
+          ZIO.fail(
+            new RuntimeException(
+              "cannot apply projection: a relational ingest writer is live; stop the writer, then re-run apply"
+            )
+          )
+      )
 
   def render(outcome: Outcome): String =
     val (headline, diagnostics) = outcome match
