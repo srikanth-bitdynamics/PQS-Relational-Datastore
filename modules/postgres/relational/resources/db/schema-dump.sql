@@ -309,6 +309,47 @@ $$;
 
 
 --
+-- Name: __rel_promote_column(text, text, text, pqs_relational.rel_entity_kind, text, text); Type: PROCEDURE; Schema: pqs_relational; Owner: -
+--
+
+CREATE PROCEDURE pqs_relational.__rel_promote_column(IN package_name text, IN module_name text, IN entity_name text, IN kind pqs_relational.rel_entity_kind, IN col text, IN coltype text)
+    LANGUAGE plpgsql
+    AS $$
+declare
+    tbl      text;
+    existing text;
+begin
+    if octet_length(col) > 63 then
+        raise exception 'projection column % is % bytes, over the 63-byte identifier limit', col, octet_length(col);
+    end if;
+    select base_table from __rel_entity e
+    where e.package_name = __rel_promote_column.package_name
+      and e.module_name = __rel_promote_column.module_name
+      and e.entity_name = __rel_promote_column.entity_name
+      and e.kind = __rel_promote_column.kind
+    into tbl;
+    if tbl is null then
+        raise exception 'relational entity %:%:% (%) is not initialized; run schema apply first',
+            package_name, module_name, entity_name, kind;
+    end if;
+    select case data_type
+               when 'numeric' then format('numeric(%s, %s)', numeric_precision, numeric_scale)
+               when 'timestamp with time zone' then 'timestamptz'
+               else data_type
+           end
+    from information_schema.columns c
+    where c.table_schema = current_schema() and c.table_name = tbl and c.column_name = col
+    into existing;
+    if existing is null then
+        execute format('alter table %I add column %I %s', tbl, col, coltype);
+    elsif existing <> coltype then
+        raise exception 'projection column %.% is % but the projection expects %', tbl, col, existing, coltype;
+    end if;
+end
+$$;
+
+
+--
 -- Name: __rel_typed_table_name(text, text, text, pqs_relational.rel_entity_kind); Type: FUNCTION; Schema: pqs_relational; Owner: -
 --
 
@@ -498,7 +539,7 @@ CREATE TABLE pqs_relational.__query_projection (
     projection_version bigint NOT NULL,
     definition jsonb NOT NULL,
     definition_hash text NOT NULL,
-    encoding_flags jsonb NOT NULL,
+    resolved_shape jsonb NOT NULL,
     layout smallint NOT NULL,
     status pqs_relational.rel_projection_status NOT NULL,
     backfilled_through_ix bigint,
@@ -893,6 +934,14 @@ ALTER TABLE ONLY pqs_relational.__query_events
 
 ALTER TABLE ONLY pqs_relational.__query_events
     ADD CONSTRAINT __query_events_pkey PRIMARY KEY (event_pk);
+
+
+--
+-- Name: __query_projection __query_projection_definition_hash_key; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__query_projection
+    ADD CONSTRAINT __query_projection_definition_hash_key UNIQUE (definition_hash);
 
 
 --

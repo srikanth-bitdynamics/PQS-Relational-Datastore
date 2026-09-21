@@ -12,7 +12,13 @@ import com.digitalasset.zio.daml.{DamlSchema, LedgerScope}
 import com.digitalasset.zio.daml.ledgerapi.PackageService
 import zio.Console.printLine
 import zio.ZIO.{logInfo, logTrace, serviceWithZIO}
-import com.digitalasset.pqs.postgres.relational.projection.ProjectionRegistry
+import com.digitalasset.pqs.postgres.relational.projection.{
+  ProjectionApply,
+  ProjectionDefinition,
+  ProjectionQuery,
+  ProjectionRegistry
+}
+import com.digitalasset.transcode.schema.Schema
 import zio.config.magnolia.{Descriptor, describe}
 import zio.jdbc.{ZConnection, transaction}
 import zio.{ZIO, ZLayer}
@@ -89,8 +95,14 @@ object Main extends ComposableApp:
       )
 
   private def appProjection =
-    "projection" @@ Command("Inspect relational typed-column projections")
-      - (appProjectionList | appProjectionShow)
+    "projection" @@ Command("Manage relational typed-column projections")
+      - (appProjectionApply | appProjectionList | appProjectionShow)
+
+  private def appProjectionApply = (
+    "apply" @@ Command("Resolve the configured projection, add typed columns and record a draft version")
+      - cliConfig[ConfigProjectionApply]
+      `map` projectionApply
+  )
 
   private def appProjectionList = (
     "list" @@ Command("List projection versions and their status")
@@ -103,6 +115,26 @@ object Main extends ComposableApp:
       - cliConfig[ConfigProjection]
       `map` projectionShow
   )
+
+  private def projectionApply(config: ZLayer[Any, Throwable, ConfigProjectionApply]) =
+    (for
+      schema      <- ZIO.service[Schema]
+      projections <- ZIO.service[Map[String, ProjectionConfig]]
+      outcome     <- transaction(ProjectionApply.apply(projections.view.mapValues(_.toDefinition).toMap, schema))
+      _           <- printLine(ProjectionApply.render(outcome))
+    yield ())
+      .provide(
+        com.digitalasset.pqs.appversion.LogVersion,
+        (config.project(_.ledger.auth) ++ config.project(_.oauth)) >>> Auth.live(LedgerScope),
+        TokenService.live,
+        config.project(_.ledger) >>> daml.Channel.live,
+        config.project(_.postgres),
+        config.project(_.projections),
+        backend.instanceId,
+        backend.connectionPool,
+        config.project(_.ledger) >>> PackageService.live >>> ZLayer.fromZIO(serviceWithZIO[PackageService](_.getSchema))
+      )
+      .bootstrap(config.project(_.logger).orElse(FileLogging.default) >>> com.digitalasset.pqs.cli.bootstrap)
 
   private def projectionList(config: ZLayer[Any, Throwable, ConfigProjection]) =
     withRegistry(config)(
@@ -153,6 +185,31 @@ object Main extends ComposableApp:
 
   private final case class ConfigProjection(
       postgres: backend.PostgresConfig,
+      logger: FileLogging.Config
+  )
+
+  private final case class ProjectionQueryConfig(
+      filter: List[String] = List.empty,
+      order: List[String] = List.empty
+  )
+  private object ProjectionQueryConfig:
+    given Descriptor[ProjectionQueryConfig] = Descriptor.derived
+
+  private final case class ProjectionConfig(
+      templates: List[String] = List.empty,
+      promote: List[String] = List.empty,
+      queries: List[ProjectionQueryConfig] = List.empty
+  ):
+    def toDefinition: ProjectionDefinition =
+      ProjectionDefinition(templates, promote, queries.map(q => ProjectionQuery(q.filter, q.order)))
+  private object ProjectionConfig:
+    given Descriptor[ProjectionConfig] = Descriptor.derived
+
+  private final case class ConfigProjectionApply(
+      ledger: daml.Config,
+      oauth: auth.Config.OAuth,
+      postgres: backend.PostgresConfig,
+      projections: Map[String, ProjectionConfig] = Map.empty,
       logger: FileLogging.Config
   )
 

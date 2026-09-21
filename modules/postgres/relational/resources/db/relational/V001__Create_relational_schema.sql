@@ -155,11 +155,13 @@ create table __query_projection (
     projection_version    bigint primary key,
     definition            jsonb not null,
     definition_hash       text not null,
+    resolved_shape        jsonb not null,
     layout                smallint not null,
     status                rel_projection_status not null,
     backfilled_through_ix bigint,
     created_at            timestamptz not null,
-    activated_at          timestamptz
+    activated_at          timestamptz,
+    unique (definition_hash)
 );
 
 create table __rel_managed_index (
