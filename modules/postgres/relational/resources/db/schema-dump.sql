@@ -655,6 +655,20 @@ CREATE TABLE pqs_relational.__query_projection (
 
 
 --
+-- Name: __rel_backfill_progress; Type: TABLE; Schema: pqs_relational; Owner: -
+--
+
+CREATE TABLE pqs_relational.__rel_backfill_progress (
+    projection_version bigint NOT NULL,
+    qualified text NOT NULL,
+    cursor_tx_ix bigint DEFAULT '-1'::integer NOT NULL,
+    cursor_pk bigint DEFAULT 0 NOT NULL,
+    through_ix bigint NOT NULL,
+    completed boolean DEFAULT false NOT NULL
+);
+
+
+--
 -- Name: __rel_choice; Type: TABLE; Schema: pqs_relational; Owner: -
 --
 
@@ -1086,6 +1100,14 @@ ALTER TABLE ONLY pqs_relational.__query_projection
 
 
 --
+-- Name: __rel_backfill_progress __rel_backfill_progress_pkey; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__rel_backfill_progress
+    ADD CONSTRAINT __rel_backfill_progress_pkey PRIMARY KEY (projection_version, qualified);
+
+
+--
 -- Name: __rel_choice __rel_choice_entity_pk_choice_key; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
 --
 
@@ -1342,6 +1364,14 @@ CREATE TRIGGER __rel_update_watermark_trg BEFORE UPDATE OF tx_ix ON pqs_relation
 
 ALTER TABLE ONLY pqs_relational.__query_events
     ADD CONSTRAINT __query_events_template_entity_pk_fkey FOREIGN KEY (template_entity_pk) REFERENCES pqs_relational.__rel_entity(pk);
+
+
+--
+-- Name: __rel_backfill_progress __rel_backfill_progress_projection_version_fkey; Type: FK CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__rel_backfill_progress
+    ADD CONSTRAINT __rel_backfill_progress_projection_version_fkey FOREIGN KEY (projection_version) REFERENCES pqs_relational.__query_projection(projection_version);
 
 
 --

@@ -178,6 +178,16 @@ create table __rel_managed_index (
     validated_at         timestamptz
 );
 
+create table __rel_backfill_progress (
+    projection_version bigint not null references __query_projection (projection_version),
+    qualified          text not null,
+    cursor_tx_ix       bigint not null default -1,
+    cursor_pk          bigint not null default 0,
+    through_ix         bigint not null,
+    completed          boolean not null default false,
+    primary key (projection_version, qualified)
+);
+
 create table __rel_redaction (
     id             bigserial primary key,
     contract_id    text,

@@ -167,7 +167,7 @@ object Main extends ComposableApp:
             for
               shapeJson <- ProjectionRegistry.resolvedShapeOf(version)
               shapes = shapeJson.fold(Map.empty[String, Shape.ResolvedShape])(ProjectionBinding.parse)
-              through <- ProjectionBackfill.run(codec, shapes)
+              through <- ProjectionBackfill.run(codec, shapes, version)
               _       <- ProjectionRegistry.setBackfilledThrough(version, through)
             yield s"Backfilled projection version $version through tx_ix $through"
         }

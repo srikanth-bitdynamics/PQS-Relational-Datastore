@@ -7,56 +7,138 @@ import zio.ZIO
 import zio.jdbc.*
 
 object ProjectionBackfill:
+  private val ChunkSize = 5000
+
   def run(
       codec: Dictionary[Codec[Value]],
-      shapes: Map[String, Shape.ResolvedShape]
+      shapes: Map[String, Shape.ResolvedShape],
+      version: Long,
+      chunkSize: Int = ChunkSize
   ): ZIO[ZConnection, Throwable, Long] =
     for
-      through <- sql"select tx_ix from latest_checkpoint()".query[Long].selectOne.map(_.getOrElse(0L))
-      _       <- ZIO.foreachDiscard(shapes.values.toSeq)(shape => backfillLineage(codec, shape, through))
+      through <- resolveThrough(version)
+      _ <- ZIO.foreachDiscard(shapes.values.toSeq)(shape => backfillLineage(codec, shape, through, version, chunkSize))
     yield through
+
+  private def resolveThrough(version: Long): ZIO[ZConnection, Throwable, Long] =
+    for
+      watermark <- sql"select tx_ix from latest_checkpoint()".query[Long].selectOne.map(_.getOrElse(0L))
+      pinned <- sql"select max(through_ix) from __rel_backfill_progress where projection_version = $version"
+        .query[Option[Long]]
+        .selectOne
+        .map(_.flatten.getOrElse(0L))
+    yield math.max(watermark, pinned)
 
   private def backfillLineage(
       codec: Dictionary[Codec[Value]],
       shape: Shape.ResolvedShape,
-      through: Long
+      through: Long,
+      version: Long,
+      chunkSize: Int
   ): ZIO[ZConnection, Throwable, Unit] =
     if shape.promoted.isEmpty then ZIO.unit
     else
-      val l = shape.lineage
-      sql"""select base_table from __rel_entity
-            where package_name = ${l.packageName} and module_name = ${l.moduleName}
-              and entity_name = ${l.entityName} and kind = 'template'"""
-        .query[String]
-        .selectOne
-        .flatMap {
-          case None =>
-            ZIO.fail(
-              new RuntimeException(
-                s"relational entity ${l.packageName}:${l.moduleName}:${l.entityName} (template) is not initialized; cannot backfill"
-              )
+      val qualified = shape.lineage.qualified
+      resolveBaseTable(shape.lineage).flatMap { tbl =>
+        initProgress(version, qualified, through) *>
+          progressCursor(version, qualified).flatMap {
+            case None => ZIO.unit
+            case Some((cursorTx, cursorPk)) =>
+              chunkLoop(codec, shape, tbl, through, version, qualified, cursorTx, cursorPk, chunkSize)
+          }
+      }
+
+  private def resolveBaseTable(l: Shape.Lineage): ZIO[ZConnection, Throwable, String] =
+    sql"""select base_table from __rel_entity
+          where package_name = ${l.packageName} and module_name = ${l.moduleName}
+            and entity_name = ${l.entityName} and kind = 'template'"""
+      .query[String]
+      .selectOne
+      .flatMap {
+        case Some(tbl) => ZIO.succeed(tbl)
+        case None =>
+          ZIO.fail(
+            new RuntimeException(
+              s"relational entity ${l.packageName}:${l.moduleName}:${l.entityName} (template) is not initialized; cannot backfill"
             )
-          case Some(tbl) =>
-            val select = SqlFragment(
-              s"""select p.contract_pk, pkg.id, pkg.name, pkg.version, p.payload_json::text
-                  from ${tbl} p
-                  join __rel_contracts c on c.contract_pk = p.contract_pk
-                  join __rel_package pkg on pkg.id = c.representative_package_id
-                  where c.redaction_id is null and c.created_tx_ix <= """
-            ) ++ sql"$through"
-            select
-              .query[(Long, String, String, String, String)]
-              .selectAll
-              .flatMap(rows => ZIO.foreachDiscard(rows)(row => backfillRow(codec, shape, tbl, row)))
-        }
+          )
+      }
+
+  private def initProgress(version: Long, qualified: String, through: Long): ZIO[ZConnection, Throwable, Unit] =
+    sql"""insert into __rel_backfill_progress (projection_version, qualified, through_ix)
+          values ($version, $qualified, $through)
+          on conflict (projection_version, qualified) do update
+            set through_ix = greatest(__rel_backfill_progress.through_ix, excluded.through_ix), completed = false""".update.unit
+
+  private def progressCursor(version: Long, qualified: String): ZIO[ZConnection, Throwable, Option[(Long, Long)]] =
+    sql"""select cursor_tx_ix, cursor_pk from __rel_backfill_progress
+          where projection_version = $version and qualified = $qualified and not completed"""
+      .query[(Long, Long)]
+      .selectOne
+
+  private def chunkLoop(
+      codec: Dictionary[Codec[Value]],
+      shape: Shape.ResolvedShape,
+      tbl: String,
+      through: Long,
+      version: Long,
+      qualified: String,
+      cursorTx: Long,
+      cursorPk: Long,
+      chunkSize: Int
+  ): ZIO[ZConnection, Throwable, Unit] =
+    selectChunk(tbl, through, cursorTx, cursorPk, chunkSize).flatMap { rows =>
+      rows.maxByOption(row => (row._1, row._2)) match
+        case None => complete(version, qualified)
+        case Some(last) =>
+          ZIO.foreachDiscard(rows)(row => backfillRow(codec, shape, tbl, row)) *>
+            advanceCursor(version, qualified, last._1, last._2) *>
+            commit *>
+            chunkLoop(codec, shape, tbl, through, version, qualified, last._1, last._2, chunkSize)
+    }
+
+  private def selectChunk(
+      tbl: String,
+      through: Long,
+      cursorTx: Long,
+      cursorPk: Long,
+      chunkSize: Int
+  ): ZIO[ZConnection, Throwable, Seq[(Long, Long, String, String, String, String)]] =
+    (SqlFragment(
+      s"""select c.created_tx_ix, p.contract_pk, pkg.id, pkg.name, pkg.version, p.payload_json::text
+          from ${tbl} p
+          join __rel_contracts c on c.contract_pk = p.contract_pk
+          join __rel_package pkg on pkg.id = c.representative_package_id
+          where c.redaction_id is null and c.created_tx_ix <= """
+    ) ++ sql"$through" ++ SqlFragment(" and (c.created_tx_ix, p.contract_pk) > (") ++ sql"$cursorTx" ++
+      SqlFragment(", ") ++ sql"$cursorPk" ++ SqlFragment(") order by c.created_tx_ix, p.contract_pk limit ") ++
+      sql"$chunkSize")
+      .query[(Long, Long, String, String, String, String)]
+      .selectAll
+
+  private def advanceCursor(
+      version: Long,
+      qualified: String,
+      cursorTx: Long,
+      cursorPk: Long
+  ): ZIO[ZConnection, Throwable, Unit] =
+    sql"""update __rel_backfill_progress set cursor_tx_ix = $cursorTx, cursor_pk = $cursorPk
+          where projection_version = $version and qualified = $qualified""".update.unit
+
+  private def complete(version: Long, qualified: String): ZIO[ZConnection, Throwable, Unit] =
+    (sql"""update __rel_backfill_progress set completed = true
+           where projection_version = $version and qualified = $qualified""".update *> commit).unit
+
+  private val commit: ZIO[ZConnection, Throwable, Unit] =
+    ZIO.serviceWithZIO[ZConnection](_.access(c => if !c.getAutoCommit then c.commit()))
 
   private def backfillRow(
       codec: Dictionary[Codec[Value]],
       shape: Shape.ResolvedShape,
       tbl: String,
-      row: (Long, String, String, String, String)
+      row: (Long, Long, String, String, String, String)
   ): ZIO[ZConnection, Throwable, Unit] =
-    val (contractPk, packageId, packageName, packageVersion, json) = row
+    val (_, contractPk, packageId, packageName, packageVersion, json) = row
     val id = Identifier(
       PackageId(packageId),
       PackageName(packageName),
