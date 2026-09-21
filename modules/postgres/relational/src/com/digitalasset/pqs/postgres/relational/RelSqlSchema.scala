@@ -26,40 +26,42 @@ object RelSqlSchema extends SchemaVisitor.Unit:
       )
     )
 
+  private[relational] def lit(v: Any): String = "'" + v.toString.replace("'", "''") + "'"
+
   private def initPackage(id: PackageId, name: PackageName, version: PackageVersion) =
-    s"call __rel_initialize_package('$name', '$version', '$id');"
+    s"call __rel_initialize_package(${lit(name)}, ${lit(version)}, ${lit(id)});"
 
   private def initEntity(getPackageName: PackageId => PackageName)(entity: Template[Unit]) =
     Seq(
       s"""call __rel_initialize_entity(
-         |  '${getPackageName(entity.templateId.packageId)}',
-         |  '${entity.templateId.moduleName}',
-         |  '${entity.templateId.entityName}',
-         |  '${if entity.isInterface then "interface" else "template"}'
+         |  ${lit(getPackageName(entity.templateId.packageId))},
+         |  ${lit(entity.templateId.moduleName)},
+         |  ${lit(entity.templateId.entityName)},
+         |  ${lit(if entity.isInterface then "interface" else "template")}
          |);""".stripMargin
     ) ++ entity.implements.map { interfaceId =>
       s"""call __rel_initialize_entity(
-         |  '${getPackageName(interfaceId.packageId)}',
-         |  '${interfaceId.moduleName}',
-         |  '${interfaceId.entityName}',
-         |  'interface'
+         |  ${lit(getPackageName(interfaceId.packageId))},
+         |  ${lit(interfaceId.moduleName)},
+         |  ${lit(interfaceId.entityName)},
+         |  ${lit("interface")}
          |);""".stripMargin
     } ++ entity.implements.map { interfaceId =>
       s"""call __rel_initialize_implements(
-         |  '${getPackageName(entity.templateId.packageId)}',
-         |  '${entity.templateId.moduleName}',
-         |  '${entity.templateId.entityName}',
-         |  '${getPackageName(interfaceId.packageId)}',
-         |  '${interfaceId.moduleName}',
-         |  '${interfaceId.entityName}'
+         |  ${lit(getPackageName(entity.templateId.packageId))},
+         |  ${lit(entity.templateId.moduleName)},
+         |  ${lit(entity.templateId.entityName)},
+         |  ${lit(getPackageName(interfaceId.packageId))},
+         |  ${lit(interfaceId.moduleName)},
+         |  ${lit(interfaceId.entityName)}
          |);""".stripMargin
     } ++ entity.choices.map { c =>
       s"""call __rel_initialize_choice(
-         |  '${getPackageName(entity.templateId.packageId)}',
-         |  '${entity.templateId.moduleName}',
-         |  '${entity.templateId.entityName}',
-         |  '${if entity.isInterface then "interface" else "template"}',
-         |  '${c.name}',
+         |  ${lit(getPackageName(entity.templateId.packageId))},
+         |  ${lit(entity.templateId.moduleName)},
+         |  ${lit(entity.templateId.entityName)},
+         |  ${lit(if entity.isInterface then "interface" else "template")},
+         |  ${lit(c.name)},
          |  ${c.consuming}
          |);""".stripMargin
     }

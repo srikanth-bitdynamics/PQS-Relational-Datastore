@@ -119,4 +119,11 @@ object RelationalModelSpec extends ZIOSpecDefault:
         view._sql == "/*8*/ copy relv_iface__iface__iface (contract_pk, view_json) from stdin",
         view._row == "2\t\"v\""
       )
+    ,
+    test("a generated SQL string literal doubles embedded single quotes"):
+      assertTrue(
+        RelSqlSchema.lit("Plain") == "'Plain'",
+        RelSqlSchema.lit("Token'Name") == "'Token''Name'",
+        RelSqlSchema.lit("a'b'c") == "'a''b''c'"
+      )
   )

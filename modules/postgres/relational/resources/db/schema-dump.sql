@@ -327,6 +327,7 @@ declare
     slug      text := sp || '__' || sm || '__' || se;
     candidate text := prefix || slug;
     lossless  boolean := sp = lp and sm = lm and se = le
+                     and lp = package_name and lm = module_name and le = entity_name
                      and position('__' in lp) = 0
                      and position('__' in lm) = 0
                      and position('__' in le) = 0;
