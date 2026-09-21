@@ -60,12 +60,8 @@ object RelationalProjectionWriterSpec extends SharedLedgerAndPostgresTest:
       When:
         Postgres.query(
           for
-            _ <- sql"set search_path to pqs_relational".execute
-            entity <-
-              sql"select package_name, module_name, entity_name from __rel_entity where entity_name = 'Note' and kind = 'template'"
-                .query[(String, String, String)]
-                .selectOne
-            (pkg, module, name) = entity.get
+            _                   <- sql"set search_path to pqs_relational".execute
+            (pkg, module, name) <- RelationalQueries.lineageOf("Note")
             config = Map("asset" -> ProjectionDefinition(Seq(s"$pkg:$module:$name"), Seq("owner", "noteBody")))
             _ <- ProjectionApply.apply(
               config,
@@ -82,11 +78,9 @@ object RelationalProjectionWriterSpec extends SharedLedgerAndPostgresTest:
       Then:
         Postgres.query(
           for
-            _ <- sql"set search_path to pqs_relational".execute
-            base <- sql"select base_table from __rel_entity where entity_name = 'Note' and kind = 'template'"
-              .query[String]
-              .selectOne
-            rows <- SqlFragment(s"""select owner, "noteBody" from ${base.get} order by contract_pk""")
+            _    <- sql"set search_path to pqs_relational".execute
+            base <- RelationalQueries.baseTableOf("Note")
+            rows <- SqlFragment(s"""select owner, "noteBody" from ${base} order by contract_pk""")
               .query[(Option[String], Option[String])]
               .selectAll
           yield rows match

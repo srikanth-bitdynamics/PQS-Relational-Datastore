@@ -94,29 +94,26 @@ object RelationalQueryViewSpec extends SharedLedgerAndPostgresTest:
       Then:
         Postgres.query(
           for
-            _ <- sql"set search_path to pqs_relational".execute
-            view <- sql"select query_view from __rel_entity where entity_name = 'Note' and kind = 'template'"
-              .query[String]
-              .selectOne
+            _    <- sql"set search_path to pqs_relational".execute
+            view <- RelationalQueries.queryViewOf("Note")
             offsets <-
               sql"select created_at_offset, archived_at_offset from __rel_contracts where archived_at_offset is not null limit 1"
                 .query[(Long, Long)]
                 .selectOne
             (createdOffset, archivedOffset) = offsets.get
             _ <- sql"select set_latest($createdOffset)".query[Long].selectOne
-            activeRows <- SqlFragment(s"""select owner, "noteBody" from ${view.get} order by created_tx_ix""")
-              .query[(Option[String], Option[String])]
-              .selectAll
-            _ <- sql"select set_latest($archivedOffset)".query[Long].selectOne
-            archivedCount <- SqlFragment(s"select count(*) from ${view.get}")
-              .query[Long]
-              .selectOne
-              .map(_.getOrElse(-1L))
+            activeRows <-
+              SqlFragment(s"""select owner, "noteBody", payload_json::text from ${view} order by created_tx_ix""")
+                .query[(Option[String], Option[String], Option[String])]
+                .selectAll
+            _             <- sql"select set_latest($archivedOffset)".query[Long].selectOne
+            archivedCount <- SqlFragment(s"select count(*) from ${view}").query[Long].selectOne.map(_.getOrElse(-1L))
           yield activeRows match
-            case Seq((owner, body)) =>
+            case Seq((owner, body, payload)) =>
               assertTrue(
                 owner.exists(_.startsWith("Alice")),
                 body.contains("hello"),
+                payload.exists(_.contains("hello")),
                 archivedCount == 0L
               )
             case _ => assertTrue(false)
