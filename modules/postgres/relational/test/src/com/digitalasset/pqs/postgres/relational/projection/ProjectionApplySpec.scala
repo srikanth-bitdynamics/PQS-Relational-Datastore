@@ -39,6 +39,25 @@ object ProjectionApplySpec extends ZIOSpecDefault:
         plan.hash != ProjectionApply.plan(config, assetSchema(12)).hash
       )
     ,
+    test("a queries-only change or a projection rename keeps the physical shape hash"):
+      val promote = Seq("owner", "amount")
+      val base    = Map("asset" -> ProjectionDefinition(Seq("Finance:Main:Asset"), promote))
+      val queried = Map(
+        "asset" -> ProjectionDefinition(
+          Seq("Finance:Main:Asset"),
+          promote,
+          Seq(ProjectionQuery(Seq("owner"), Seq("amount desc")))
+        )
+      )
+      val renamed  = Map("portfolio" -> ProjectionDefinition(Seq("Finance:Main:Asset"), promote))
+      val original = ProjectionApply.plan(base, assetSchema(10))
+      assertTrue(
+        original.hash != ProjectionApply.plan(queried, assetSchema(10)).hash,
+        original.shapeHash == ProjectionApply.plan(queried, assetSchema(10)).shapeHash,
+        original.shapeHash == ProjectionApply.plan(renamed, assetSchema(10)).shapeHash,
+        original.shapeHash != ProjectionApply.plan(base, assetSchema(12)).shapeHash
+      )
+    ,
     test("errors on an unknown template and diagnoses a non-promotable field"):
       val config = Map(
         "asset"   -> ProjectionDefinition(Seq("Finance:Main:Asset"), Seq("owner", "tags")),

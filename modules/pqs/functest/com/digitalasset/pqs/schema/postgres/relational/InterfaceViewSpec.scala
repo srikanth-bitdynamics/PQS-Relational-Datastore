@@ -85,7 +85,9 @@ object InterfaceViewSpec extends SharedLedgerAndPostgresTest:
                 (select count(*)::text from pqs_relational.__rel_implements i
                    join pqs_relational.__rel_entity t on i.template_pk = t.pk
                    join pqs_relational.__rel_entity f on i.interface_pk = f.pk
-                   where t.entity_name = 'Token' and f.entity_name = 'IAsset') as v
+                   where t.entity_name = 'Token' and f.entity_name = 'IAsset'
+                     and exists (select 1 from pqs_relational.__rel_contracts c
+                                 where c.template_entity_pk = t.pk)) as v
               union all select 'base_rows', (select count(*)::text from pqs_relational.$b)
               union all select 'view_rows', (select count(*)::text from pqs_relational.$v)
               union all select 'payload_label', (select payload_json ->> 'label' from pqs_relational.$b)
