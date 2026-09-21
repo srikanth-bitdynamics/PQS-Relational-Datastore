@@ -19,5 +19,6 @@ object VersionSpec extends FuncTestDefault:
     And:
       Pqs.stdout `is` stringMatching("""^pqs, version: (.*)
                                        |daml-sdk.version: (\d+\.\d+\.\d+)(-.*)?
-                                       |postgres-document.schema: (\d{3})$""".stripMargin)
+                                       |postgres-document.schema: (\d{3})
+                                       |postgres-relational.schema: (\d{3})$""".stripMargin)
 end VersionSpec

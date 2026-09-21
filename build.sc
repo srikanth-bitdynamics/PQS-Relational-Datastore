@@ -220,6 +220,18 @@ object `package` extends RootModule { root =>
         .substring(1, 4)
     }
 
+    // Kept separate from latestSchemaVersion because the relational backend maintains an independent Flyway
+    // history under db/relational; folding both into one .max would print a bogus document schema number.
+    def latestRelationalSchemaVersion = T {
+      Lib
+        .findSourceFiles(postgres.relational.resources(), Seq("sql"))
+        .map(PathRef(_))
+        .map(_.path.last)
+        .filter(_.startsWith("V"))
+        .max
+        .substring(1, 4)
+    }
+
     override def resources = T {
       val metainf = T.dest / "META-INF"
       os.makeDir(metainf)
@@ -227,6 +239,7 @@ object `package` extends RootModule { root =>
       os.write(
         metainf / s"${artifactName()}-version.properties",
         s"""${postgres.document.artifactName()}.schema=${latestSchemaVersion()}
+           |${postgres.relational.artifactName()}.schema=${latestRelationalSchemaVersion()}
            |daml-sdk.version=${V.damlc}
            |""".stripMargin
       )
