@@ -63,6 +63,7 @@ object Main extends ComposableApp:
             .update(_.matchByPackageId)
       )
       >+> ZLayer.service[ConfigPipeline].project(_.target.schema)
+      >+> ZLayer.service[ConfigPipeline].project(_.target.encoding)
       >+> RelationalPostgres.live
 
   private def destinationPostgresDocument =

@@ -47,6 +47,24 @@ begin
 end;
 $$ language plpgsql;
 
+create or replace procedure __rel_pin_encoding(p_numeric boolean, p_int64 boolean, p_exclude boolean) as
+$$
+declare
+    existing __rel_encoding%rowtype;
+begin
+    insert into __rel_encoding (singleton, numeric_as_string, int64_as_string, exclude_nulls)
+    values (true, p_numeric, p_int64, p_exclude)
+    on conflict (singleton) do nothing;
+    select * from __rel_encoding into existing;
+    if existing.numeric_as_string is distinct from p_numeric
+       or existing.int64_as_string is distinct from p_int64
+       or existing.exclude_nulls is distinct from p_exclude then
+        raise exception 'datastore payload encoding is pinned as (%, %, %) but the writer is configured as (%, %, %)',
+            existing.numeric_as_string, existing.int64_as_string, existing.exclude_nulls, p_numeric, p_int64, p_exclude;
+    end if;
+end;
+$$ language plpgsql;
+
 create or replace procedure __rel_initialize_entity(
     package_name text,
     module_name text,

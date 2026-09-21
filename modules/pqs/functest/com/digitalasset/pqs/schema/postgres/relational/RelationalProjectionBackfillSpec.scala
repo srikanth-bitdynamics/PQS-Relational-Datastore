@@ -11,7 +11,6 @@ import com.digitalasset.pqs.postgres.relational.projection.{
 import com.digitalasset.pqs.services.daml.{DamlSdk, DamlSource, Party}
 import com.digitalasset.pqs.services.postgres.Postgres
 import com.digitalasset.pqs.services.pqs.Pqs
-import com.digitalasset.transcode.codec.json.JsonCodec
 import com.digitalasset.transcode.schema.*
 import zio.jdbc.*
 import zio.test.*
@@ -86,14 +85,13 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
                 .selectOne
             (pkgId, pkg, version, module, entity) = id.get
             schema                                = schemaFor(pkgId, pkg, version, module, entity)
-            codec                                 = DescriptorSchemaProcessor.assertProcess(schema, JsonCodec())
             config = Map("asset" -> ProjectionDefinition(Seq(s"$pkg:$module:$entity"), Seq("owner", "noteBody")))
             _     <- ProjectionApply.apply(config, schema)
             draft <- ProjectionRegistry.latestDraft
             version1 = draft.get
             shape <- ProjectionRegistry.resolvedShapeOf(version1)
             shapes = shape.fold(Map.empty)(ProjectionBinding.parse)
-            through <- ProjectionBackfill.run(codec, shapes, version1)
+            through <- ProjectionBackfill.run(schema, shapes, version1)
             _       <- ProjectionRegistry.setBackfilledThrough(version1, through)
             _       <- ProjectionRegistry.activate(version1)
           yield ()
@@ -149,7 +147,6 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
                 .selectOne
             (pkgId, pkg, pkgVersion, module, entity) = id.get
             schema                                   = schemaFor(pkgId, pkg, pkgVersion, module, entity)
-            codec                                    = DescriptorSchemaProcessor.assertProcess(schema, JsonCodec())
             config = Map("asset" -> ProjectionDefinition(Seq(s"$pkg:$module:$entity"), Seq("owner", "noteBody")))
             _     <- ProjectionApply.apply(config, schema)
             draft <- ProjectionRegistry.latestDraft
@@ -170,7 +167,7 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
             _ <- sql"""insert into __rel_backfill_progress
                          (projection_version, qualified, cursor_tx_ix, cursor_pk, through_ix, completed)
                        values ($versionNo, $qualified, $firstTx, $firstPk, $through, false)""".update
-            _ <- ProjectionBackfill.run(codec, shapes, versionNo, 1)
+            _ <- ProjectionBackfill.run(schema, shapes, versionNo, 1)
             rows <- SqlFragment(
               s"""select p.owner, p."noteBody" from ${base.get} p
                   join __rel_contracts c on c.contract_pk = p.contract_pk
@@ -180,6 +177,9 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
               sql"select completed from __rel_backfill_progress where projection_version = $versionNo and qualified = $qualified"
                 .query[Boolean]
                 .selectOne
+            encoding <- sql"select numeric_as_string, int64_as_string, exclude_nulls from __rel_encoding"
+              .query[(Boolean, Boolean, Boolean)]
+              .selectOne
           yield rows match
             case Seq((owner1, note1), (owner2, note2), (owner3, note3)) =>
               assertTrue(
@@ -189,7 +189,8 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
                 note2.contains("hello"),
                 owner3.exists(_.startsWith("Alice")),
                 note3.contains("hello"),
-                done.contains(true)
+                done.contains(true),
+                encoding.contains((true, true, false))
               )
             case _ => assertTrue(false)
         )

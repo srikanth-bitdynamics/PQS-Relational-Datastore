@@ -460,10 +460,14 @@ object RelationalPostgres:
         pool       <- ZIO.service[ZConnectionPool]
         schema     <- ZIO.service[RelSqlSchema]
         codec      <- ZIO.service[Dictionary[Codec[Value]]]
+        encoding   <- ZIO.service[EncodingConfig]
 
         fenceEnv <- WriterFence.acquire(pool, poolConfig.maxConnections)
 
         _ <- RelationalSchema.applySchema(poolConfig, instanceId, config.baseline) when config.autoApply
+        _ <- transaction(
+          sql"call __rel_pin_encoding(${encoding.numericAsString}, ${encoding.int64AsString}, ${encoding.excludeNulls})".execute
+        )
 
         entities <- transaction {
           sql"""select pkg.id, e.module_name, e.entity_name, e.pk, e.base_table

@@ -178,6 +178,13 @@ create table __rel_managed_index (
     validated_at         timestamptz
 );
 
+create table __rel_encoding (
+    singleton         boolean primary key default true check (singleton),
+    numeric_as_string boolean not null,
+    int64_as_string   boolean not null,
+    exclude_nulls     boolean not null
+);
+
 create table __rel_backfill_progress (
     projection_version bigint not null references __query_projection (projection_version),
     qualified          text not null,

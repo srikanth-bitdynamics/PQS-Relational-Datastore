@@ -312,6 +312,30 @@ $$;
 
 
 --
+-- Name: __rel_pin_encoding(boolean, boolean, boolean); Type: PROCEDURE; Schema: pqs_relational; Owner: -
+--
+
+CREATE PROCEDURE pqs_relational.__rel_pin_encoding(IN p_numeric boolean, IN p_int64 boolean, IN p_exclude boolean)
+    LANGUAGE plpgsql
+    AS $$
+declare
+    existing __rel_encoding%rowtype;
+begin
+    insert into __rel_encoding (singleton, numeric_as_string, int64_as_string, exclude_nulls)
+    values (true, p_numeric, p_int64, p_exclude)
+    on conflict (singleton) do nothing;
+    select * from __rel_encoding into existing;
+    if existing.numeric_as_string is distinct from p_numeric
+       or existing.int64_as_string is distinct from p_int64
+       or existing.exclude_nulls is distinct from p_exclude then
+        raise exception 'datastore payload encoding is pinned as (%, %, %) but the writer is configured as (%, %, %)',
+            existing.numeric_as_string, existing.int64_as_string, existing.exclude_nulls, p_numeric, p_int64, p_exclude;
+    end if;
+end;
+$$;
+
+
+--
 -- Name: __rel_promote_column(text, text, text, pqs_relational.rel_entity_kind, text, text); Type: PROCEDURE; Schema: pqs_relational; Owner: -
 --
 
@@ -740,6 +764,19 @@ CREATE TABLE pqs_relational.__rel_contracts (
 
 
 --
+-- Name: __rel_encoding; Type: TABLE; Schema: pqs_relational; Owner: -
+--
+
+CREATE TABLE pqs_relational.__rel_encoding (
+    singleton boolean DEFAULT true NOT NULL,
+    numeric_as_string boolean NOT NULL,
+    int64_as_string boolean NOT NULL,
+    exclude_nulls boolean NOT NULL,
+    CONSTRAINT __rel_encoding_singleton_check CHECK (singleton)
+);
+
+
+--
 -- Name: __rel_entity; Type: TABLE; Schema: pqs_relational; Owner: -
 --
 
@@ -1145,6 +1182,14 @@ ALTER TABLE ONLY pqs_relational.__rel_contracts
 
 ALTER TABLE ONLY pqs_relational.__rel_contracts
     ADD CONSTRAINT __rel_contracts_pkey PRIMARY KEY (contract_pk);
+
+
+--
+-- Name: __rel_encoding __rel_encoding_pkey; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__rel_encoding
+    ADD CONSTRAINT __rel_encoding_pkey PRIMARY KEY (singleton);
 
 
 --
