@@ -5,6 +5,8 @@ import com.digitalasset.canonical.{ContractId, Party}
 import com.digitalasset.pqs.postgres.backend.IdPlaceholder
 import com.digitalasset.pqs.postgres.relational.model
 import com.digitalasset.pqs.postgres.relational.model.{toSqlValue, given}
+import com.digitalasset.pqs.postgres.relational.projection.TypedRowCodec
+import com.digitalasset.pqs.postgres.relational.projection.TypedRowCodec.given
 import com.digitalasset.transcode.schema.ChoiceName
 import ujson.Value
 
@@ -12,6 +14,8 @@ import java.time.Instant
 
 object specific:
   type EntityTypePk = Long
+
+  private def quoteIdent(name: String): String = "\"" + name.replace("\"", "\"\"") + "\""
 
   final class Transaction(
       val ix: Long,
@@ -148,9 +152,14 @@ object specific:
     val columns   = Seq("contract_id", "archived_tx_ix", "archived_at_offset")
     val rowValues = model.values(contractId)(archivedTxIx)(archivedAtOffset)
 
-  final case class ContractPayload(contractPk: IdPlaceholder, payloadJson: Value):
-    val columns   = Seq("contract_pk", "payload_json")
-    val rowValues = model.values(contractPk)(payloadJson)
+  final case class ContractPayload(
+      contractPk: IdPlaceholder,
+      payloadJson: Value,
+      promoted: Seq[(String, TypedRowCodec.SqlValue)] = Seq.empty
+  ):
+    val columns = Seq("contract_pk", "payload_json") ++ promoted.map(kv => quoteIdent(kv._1))
+    val rowValues =
+      promoted.foldLeft(model.values(contractPk)(payloadJson))((row, cell) => row(cell._2))
 
   final case class InterfaceView(contractPk: IdPlaceholder, viewJson: Value):
     val columns   = Seq("contract_pk", "view_json")

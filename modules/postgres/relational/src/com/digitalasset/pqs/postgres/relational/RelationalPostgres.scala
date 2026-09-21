@@ -8,8 +8,9 @@ import com.digitalasset.pqs.o11y.metrics.latency
 import com.digitalasset.pqs.o11y.traces
 import com.digitalasset.pqs.o11y.traces.given
 import com.digitalasset.pqs.postgres.backend.*
+import com.digitalasset.pqs.postgres.relational.projection.{ProjectionBinding, Shape, TypedRowCodec}
 import com.digitalasset.transcode.Codec
-import com.digitalasset.transcode.schema.{ChoiceName, Dictionary, Identifier}
+import com.digitalasset.transcode.schema.{ChoiceName, Dictionary, DynamicValue, Identifier}
 import ujson.Value
 import zio.ZIO.{logDebug, logInfo}
 import zio.jdbc.*
@@ -32,9 +33,15 @@ final case class RelationalPostgres(
     getBaseTable: Identifier => String,
     getViewTable: Identifier => String,
     isTemplate: Identifier => Boolean,
-    placeholders: IdPlaceholder.Factory
+    placeholders: IdPlaceholder.Factory,
+    projectionShapes: Map[String, Shape.ResolvedShape]
 ) extends Datastore:
   import com.digitalasset.pqs.postgres.relational.model.{offsetEncoder, toSqlValue}
+
+  private def promotedFor(id: Identifier, payload: DynamicValue): Seq[(String, TypedRowCodec.SqlValue)] =
+    projectionShapes.get(s"${id.packageName}:${id.moduleName}:${id.entityName}") match
+      case Some(shape) => shape.promoted.map(_.name).zip(TypedRowCodec.extract(shape, payload))
+      case None        => Seq.empty
 
   private val Genesis: Datastore.Checkpoint = (Offset.Genesis, 0L)
   private val env                           = ZEnvironment(pool) ++ ZEnvironment(config) ++ ZEnvironment(poolConfig)
@@ -381,7 +388,11 @@ final case class RelationalPostgres(
                 model.ContractVisibility(specific.ContractVisibility(contractPk, p, model.VisibilityRole.Witness))
               )
           val payload = model.ContractPayload(
-            specific.ContractPayload(contractPk, codec.template(templateId).fromDynamicValue(templateDv)),
+            specific.ContractPayload(
+              contractPk,
+              codec.template(templateId).fromDynamicValue(templateDv),
+              promotedFor(templateId, templateDv)
+            ),
             getBaseTable(templateId)
           )
           val views = c.payloads.filter { (id, _) => !isTemplate(id) }.map { (interfaceId, viewDv) =>
@@ -495,6 +506,9 @@ object RelationalPostgres:
                   coalesce((select max(contract_pk) from __rel_contracts), 0))""".query[Long].selectOne.someOrElse(0L)
         }
         placeholders = IdPlaceholder.factory(lastId + 1)
+
+        projectionShapes <- transaction(ProjectionBinding.activeShapes)
+        _                <- logInfo(s"Bound ${projectionShapes.size} active projection shape(s)")
       yield RelationalPostgres(
         config,
         poolConfig,
@@ -506,7 +520,8 @@ object RelationalPostgres:
         getBaseTable,
         getViewTable,
         isTemplate,
-        placeholders
+        placeholders,
+        projectionShapes
       )
     }
   }
