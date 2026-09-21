@@ -48,6 +48,8 @@ final case class RelationalPostgres(
   private val tx                            = ZLayer.succeedEnvironment(env) >>> transaction
   private val BatchEntitiesThreshold        = 10_000
   private val BatchReleaseWindow            = 200.millis
+  private val ReservedConnections           = 1
+  private val IngestParallelism             = math.max(1, poolConfig.maxConnections - ReservedConnections)
 
   override def capabilities = Datastore.Capabilities(reassignments = false, coverage = true)
 
@@ -94,7 +96,7 @@ final case class RelationalPostgres(
       >>> waitPoint("pipeline_wp_acs_batched_statements")
       >>> prepareStatements
       >>> waitPoint("pipeline_wp_acs_prepared_statements")
-      >>> executePar(16)
+      >>> executePar(IngestParallelism)
       >>> ZPipeline.flattenChunks
       >>> updateAcsOffsets
       >>> handleWatermarks
@@ -109,7 +111,7 @@ final case class RelationalPostgres(
       >>> waitPoint("pipeline_wp_batched_statements")
       >>> prepareStatements
       >>> waitPoint("pipeline_wp_prepared_statements")
-      >>> executeParUnordered(poolConfig.maxConnections)
+      >>> executeParUnordered(IngestParallelism)
       >>> waitPoint("pipeline_wp_watermarks", 1024)
       >>> reorderCheckpoints
       >>> handleWatermarks
@@ -459,6 +461,8 @@ object RelationalPostgres:
         schema     <- ZIO.service[RelSqlSchema]
         codec      <- ZIO.service[Dictionary[Codec[Value]]]
 
+        fenceEnv <- WriterFence.acquire(pool, poolConfig.maxConnections)
+
         _ <- RelationalSchema.applySchema(poolConfig, instanceId, config.baseline) when config.autoApply
 
         entities <- transaction {
@@ -507,7 +511,8 @@ object RelationalPostgres:
         }
         placeholders = IdPlaceholder.factory(lastId)
 
-        projectionShapes <- transaction(ProjectionBinding.activeShapes)
+        projectionShapes <- ProjectionBinding.activeShapes.provideEnvironment(fenceEnv)
+        _                <- fenceEnv.get[ZConnection].access(_.commit())
         _                <- logInfo(s"Bound ${projectionShapes.size} active projection shape(s)")
       yield RelationalPostgres(
         config,
@@ -525,4 +530,5 @@ object RelationalPostgres:
       )
     }
   }
+
 end RelationalPostgres

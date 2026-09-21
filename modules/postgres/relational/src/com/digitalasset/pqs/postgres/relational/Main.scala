@@ -57,9 +57,12 @@ object Main extends ComposableApp:
       config     <- ZIO.service[backend.SchemaConfig]
       poolConfig <- ZIO.service[backend.PostgresConfig]
       instanceId <- ZIO.service[backend.InstanceId]
-      _          <- RelationalSchema.applySchema(poolConfig, instanceId, config.baseline)
-      _          <- logInfo("Applied required datastore schema")
-      _          <- printLine("Finished applying schema to datastore")
+      pool       <- ZIO.service[ZConnectionPool]
+      _ <- WriterFence.requireIdle(pool, poolConfig.maxConnections)(
+        RelationalSchema.applySchema(poolConfig, instanceId, config.baseline)
+      )
+      _ <- logInfo("Applied required datastore schema")
+      _ <- printLine("Finished applying schema to datastore")
     yield ())
       .provide(
         com.digitalasset.pqs.appversion.LogVersion,

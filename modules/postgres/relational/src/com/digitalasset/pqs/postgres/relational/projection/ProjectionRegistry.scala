@@ -6,6 +6,7 @@ import zio.jdbc.*
 
 object ProjectionRegistry:
   val projectionLockKey: Long = 0x70716a5f70726f6aL
+  val writerLockKey: Long     = 0x70716a5f7772746cL
 
   final case class Row(
       version: Long,
@@ -82,8 +83,20 @@ object ProjectionRegistry:
 
   def activate(version: Long): ZIO[ZConnection, Throwable, Unit] =
     for
-      _       <- sql"select 1 from pg_advisory_xact_lock(${projectionLockKey})".query[Int].selectOne
-      _       <- sql"update __query_projection set status = 'retired' where status = 'active'".update
+      _ <- sql"select 1 from pg_advisory_xact_lock(${projectionLockKey})".query[Int].selectOne
+      acquired <- sql"select case when pg_try_advisory_xact_lock(${writerLockKey}) then 1 else 0 end"
+        .query[Int]
+        .selectOne
+        .map(_.getOrElse(0))
+      _ <- acquired.compareTo(1) match
+        case 0 => ZIO.unit
+        case _ =>
+          ZIO.fail(
+            new RuntimeException(
+              "cannot activate projection: a relational ingest writer is live; stop the writer, then re-run activate"
+            )
+          )
+      _ <- sql"update __query_projection set status = 'retired' where status = 'active'".update
       updated <- sql"""update __query_projection set status = 'active', activated_at = now()
                        where projection_version = $version and status = 'draft'""".update
       _ <- updated.compareTo(1L) match
