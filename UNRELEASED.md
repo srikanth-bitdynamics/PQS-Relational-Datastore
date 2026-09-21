@@ -9,7 +9,7 @@ _Write summary of release_
 ## SQL Migration
 
 This release includes the following SQL migrations:
-- _postgres-relational/V001__Create_relational_schema.sql_: creates the initial relational schema in its own Flyway history. Does not migrate existing document stores.
+- _postgres-relational/V001__Create_relational_schema.sql_: creates the initial relational schema in its own Flyway history. Does not migrate existing document stores. **[Impact: Instantaneous]**
 - _V043__Add_reassignment_event_types.sql_: adds the `assign` and `unassign` labels to the `__event_type` enum. Metadata-only, no table is scanned or rewritten. **[Impact: Instantaneous]**
 
 ## What's New

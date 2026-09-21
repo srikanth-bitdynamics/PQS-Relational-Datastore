@@ -40,7 +40,7 @@ object RelationalSchema:
                 s"jdbc:postgresql://${pgCfg.host}:${pgCfg.port}/${pgCfg.database}?currentSchema=${pgCfg.schema}",
                 pgCfg.username,
                 pgCfg.password.value,
-                (sslprops(pgCfg.tls) ++ instanceIdProp(instanceId)).asJava
+                (sslprops(pgCfg.tls) ++ instanceIdProp(instanceId) ++ pgCfg.properties.view.mapValues(_.value)).asJava
               )
             )
             .schemas(pgCfg.schema)

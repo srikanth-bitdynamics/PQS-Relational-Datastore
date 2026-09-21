@@ -69,12 +69,12 @@ object InterfaceViewSpec extends SharedLedgerAndPostgresTest:
         FuncTest.retryUntilTimeout(
           (for
             base <- Postgres.query(
-              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'Token' and kind = 'template'"
+              sql"select distinct e.base_table from pqs_relational.__rel_entity e join pqs_relational.__rel_contracts c on c.template_entity_pk = e.pk where e.entity_name = 'Token' and e.kind = 'template'"
                 .query[String]
                 .selectOne
             )
             view <- Postgres.query(
-              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'IAsset' and kind = 'interface'"
+              sql"select distinct i.base_table from pqs_relational.__rel_entity i join pqs_relational.__rel_implements m on m.interface_pk = i.pk join pqs_relational.__rel_contracts c on c.template_entity_pk = m.template_pk where i.entity_name = 'IAsset' and i.kind = 'interface'"
                 .query[String]
                 .selectOne
             )
@@ -131,12 +131,12 @@ object InterfaceViewSpec extends SharedLedgerAndPostgresTest:
         FuncTest.retryUntilTimeout(
           (for
             base <- Postgres.query(
-              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'Token' and kind = 'template'"
+              sql"select distinct e.base_table from pqs_relational.__rel_entity e join pqs_relational.__rel_contracts c on c.template_entity_pk = e.pk where e.entity_name = 'Token' and e.kind = 'template'"
                 .query[String]
                 .selectOne
             )
             view <- Postgres.query(
-              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'IAsset' and kind = 'interface'"
+              sql"select distinct i.base_table from pqs_relational.__rel_entity i join pqs_relational.__rel_implements m on m.interface_pk = i.pk join pqs_relational.__rel_contracts c on c.template_entity_pk = m.template_pk where i.entity_name = 'IAsset' and i.kind = 'interface'"
                 .query[String]
                 .selectOne
             )
