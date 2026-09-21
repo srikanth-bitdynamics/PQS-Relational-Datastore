@@ -59,8 +59,8 @@ create table __rel_choice (
 );
 
 create table __rel_implements (
-    template_pk  bigint not null,
-    interface_pk bigint not null,
+    template_pk  bigint not null references __rel_entity (pk),
+    interface_pk bigint not null references __rel_entity (pk),
     primary key (template_pk, interface_pk)
 );
 
@@ -166,7 +166,7 @@ create table __query_projection (
 
 create table __rel_managed_index (
     index_id             bigserial primary key,
-    projection_version   bigint,
+    projection_version   bigint references __query_projection (projection_version),
     table_name           text not null,
     index_name           text not null,
     definition           text not null,

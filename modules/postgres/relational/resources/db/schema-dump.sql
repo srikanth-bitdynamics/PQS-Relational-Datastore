@@ -1239,6 +1239,30 @@ ALTER TABLE ONLY pqs_relational.__rel_exercises
 
 
 --
+-- Name: __rel_implements __rel_implements_interface_pk_fkey; Type: FK CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__rel_implements
+    ADD CONSTRAINT __rel_implements_interface_pk_fkey FOREIGN KEY (interface_pk) REFERENCES pqs_relational.__rel_entity(pk);
+
+
+--
+-- Name: __rel_implements __rel_implements_template_pk_fkey; Type: FK CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__rel_implements
+    ADD CONSTRAINT __rel_implements_template_pk_fkey FOREIGN KEY (template_pk) REFERENCES pqs_relational.__rel_entity(pk);
+
+
+--
+-- Name: __rel_managed_index __rel_managed_index_projection_version_fkey; Type: FK CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__rel_managed_index
+    ADD CONSTRAINT __rel_managed_index_projection_version_fkey FOREIGN KEY (projection_version) REFERENCES pqs_relational.__query_projection(projection_version);
+
+
+--
 -- Name: rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb40345 rel_com_digitalasset_pqs_schema_postgres_relat_contract_pk_fkey; Type: FK CONSTRAINT; Schema: pqs_relational; Owner: -
 --
 
