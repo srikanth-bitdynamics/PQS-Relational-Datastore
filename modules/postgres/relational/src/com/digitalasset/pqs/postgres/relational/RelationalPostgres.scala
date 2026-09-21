@@ -64,18 +64,19 @@ final case class RelationalPostgres(
       case Datastore.Datasource.TransactionTreeStream => true
       case Datastore.Datasource.TransactionStream     => false
     tx(
-      // stamp the writer instance so the watermark trigger advances this run's row, not whatever row has the max id
-      sql"""insert into __query_coverage (
-              instance_id, source_kind, requested_from_offset, actual_from_offset, through_offset, source_pruned_offset,
-              acs_seed_offset, ingested_all_parties, ingested_parties, contract_filter, metadata_filter, tree_stream,
-              create_history_complete, exercise_history_complete, archive_history_complete, archive_visibility_complete,
-              reassignment_history_complete, assignment_origin_state_complete, started_at, completed_at)
-            values (
-              (select instance_id from __rel_watermark),
-              ${"stream"}::rel_source_kind, ${record.normalizedStart.toSqlValue}, ${record.actualStart.toSqlValue},
-              ${record.actualStart.toSqlValue}, ${Option.empty[Long]}, ${record.acsSeedOffset.map(_.toSqlValue)},
-              $allParties, ${parties}::text[], ${record.contractFilter}, ${record.metadataFilter}, $treeStream,
-              true, $treeStream, true, true, false, false, now(), null)""".update.unit
+      sql"call __rel_ensure_writer_valid()".execute *>
+        sql"""insert into __query_coverage (
+                instance_id, source_kind, requested_from_offset, actual_from_offset, through_offset, source_pruned_offset,
+                acs_seed_offset, ingested_all_parties, ingested_parties, contract_filter, metadata_filter, tree_stream,
+                create_history_complete, exercise_history_complete, archive_history_complete, archive_visibility_complete,
+                reassignment_history_complete, assignment_origin_state_complete, started_at, completed_at)
+              values (
+                current_setting('scribe.instance'),
+                ${"stream"}::rel_source_kind, ${record.normalizedStart.toSqlValue}, ${record.actualStart.toSqlValue},
+                ${record.actualStart.toSqlValue}, ${Option.empty[Long]},
+                (select ledger_offset from __rel_transactions where tx_ix = 0),
+                $allParties, ${parties}::text[], ${record.contractFilter}, ${record.metadataFilter}, $treeStream,
+                true, $treeStream, true, true, false, false, now(), null)""".update.unit
     )
 
   override def processAcs = (
@@ -186,7 +187,7 @@ final case class RelationalPostgres(
         val onlyTxs = models.onlyTransactions()
         ZIO.attempt {
           traces.span("execute batch") {
-            model.Model.prepareStatement(models, model.statTables)
+            (sql"call __rel_ensure_writer_valid()".execute *> model.Model.prepareStatement(models, model.statTables))
               @@ trackExecute
               @@ traces.attributes("pqs.batch.models_count" -> models.length.toLong)
               <* ZIO.foreachDiscard(onlyTxs) { tx =>
@@ -339,14 +340,13 @@ final case class RelationalPostgres(
 
     event match
       case c: canonical.specific.Event.Created =>
-        // Route each payload by entity kind rather than position: the template's create argument goes to the base
-        // table, each interface view to its view table. PQS's schema closure pulls an interface's implementing
-        // templates into every subscription, so a create always carries its template payload; classifying by kind
-        // avoids depending on the payload ordering to hold that invariant.
         c.payloads.find { (id, _) => isTemplate(id) }.fold(Chunk.empty[model.Model]) { (templateId, templateDv) =>
           val templateEntityPk = getEntityPk(templateId)
           // the contract reuses its create event's pk, so a create allocates one id, not two
           val contractPk = eventPk
+          val historyLowerBound = sourceKind match
+            case model.SourceKind.AcsSeed => true
+            case _                        => false
           val contract = model.Contract(
             specific.Contract(
               contractPk = contractPk,
@@ -366,7 +366,8 @@ final case class RelationalPostgres(
               contractKeyHash = codec.getTemplateKey(templateId).flatMap(_ => c.contractKeyHash),
               acsDelta = c.acsDelta,
               sourceKind = sourceKind,
-              synchronizerId = synchronizerId
+              synchronizerId = synchronizerId,
+              historyLowerBound = historyLowerBound
             )
           )
           val contractVisibility =

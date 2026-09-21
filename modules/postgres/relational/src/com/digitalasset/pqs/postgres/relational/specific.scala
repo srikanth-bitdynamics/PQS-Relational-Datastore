@@ -85,7 +85,8 @@ object specific:
       contractKeyHash: Option[Array[Byte]],
       acsDelta: Boolean,
       sourceKind: model.SourceKind,
-      synchronizerId: Option[String]
+      synchronizerId: Option[String],
+      historyLowerBound: Boolean
   ):
     val columns = Seq(
       "contract_pk",
@@ -103,14 +104,15 @@ object specific:
       "contract_key_json",
       "contract_key_hash",
       "divulged_only",
-      "source_kind"
+      "source_kind",
+      "history_lower_bound"
     )
     val rowValues =
       model.values(contractPk)(contractId)(templateEntityPk)(representativePackageId)(creationPackageId)(createdAtIx)(
         createdAtOffset
       )(signatories)(observers)(createWitnesses)(synchronizerId)(metadata)(contractKey)(contractKeyHash)(
         !acsDelta
-      )(sourceKind)
+      )(sourceKind)(historyLowerBound)
 
   final case class ContractVisibility(contractPk: IdPlaceholder, party: Party, role: model.VisibilityRole):
     val columns   = Seq("contract_pk", "party", "role")

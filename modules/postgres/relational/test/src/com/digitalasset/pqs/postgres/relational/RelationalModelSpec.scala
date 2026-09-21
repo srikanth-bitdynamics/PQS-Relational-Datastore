@@ -41,7 +41,8 @@ object RelationalModelSpec extends ZIOSpecDefault:
       contractKeyHash = None,
       acsDelta = true,
       sourceKind = model.SourceKind.Stream,
-      synchronizerId = Some("sync-1")
+      synchronizerId = Some("sync-1"),
+      historyLowerBound = false
     )
   )
 
@@ -49,25 +50,32 @@ object RelationalModelSpec extends ZIOSpecDefault:
     test("COPY headers carry the /*N*/ order, table names and columns matching V001"):
       val f = factory
       val headers = Seq(
-        model.Transaction(
-          specific.Transaction(
-            1L,
-            com.digitalasset.canonical.specific.Offset.Absolute(100L),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None
+        model
+          .Transaction(
+            specific.Transaction(
+              1L,
+              com.digitalasset.canonical.specific.Offset.Absolute(100L),
+              None,
+              None,
+              None,
+              None,
+              None,
+              None
+            )
           )
-        )._sql,
+          ._sql,
         event(f.mk)._sql,
         model.EventVisibility(specific.EventVisibility(f.mk, Party("Alice")))._sql,
         contract(f.mk)._sql,
-        model.ContractVisibility(specific.ContractVisibility(f.mk, Party("Alice"), model.VisibilityRole.Signatory))._sql,
-        model.Exercise(
-          specific.Exercise(f.mk, 8L, 7L, ChoiceName("Transfer"), true, Seq(Party("Alice")), ujson.Null, ujson.Null, 4)
-        )._sql,
+        model
+          .ContractVisibility(specific.ContractVisibility(f.mk, Party("Alice"), model.VisibilityRole.Signatory))
+          ._sql,
+        model
+          .Exercise(
+            specific
+              .Exercise(f.mk, 8L, 7L, ChoiceName("Transfer"), true, Seq(Party("Alice")), ujson.Null, ujson.Null, 4)
+          )
+          ._sql,
         model.TmpLifecycle(specific.TmpLifecycle(ContractId("cid-1"), 5L, Some(100L)))._sql
       )
       assertTrue(
@@ -78,7 +86,7 @@ object RelationalModelSpec extends ZIOSpecDefault:
         headers(2) ==
           "/*2*/ copy __query_event_visibility (event_pk, party) from stdin",
         headers(3) ==
-          "/*3*/ copy __rel_contracts (contract_pk, contract_id, template_entity_pk, representative_package_id, creation_package_id, created_tx_ix, created_at_offset, signatories, observers, create_witnesses, creation_synchronizer_id, metadata, contract_key_json, contract_key_hash, divulged_only, source_kind) from stdin",
+          "/*3*/ copy __rel_contracts (contract_pk, contract_id, template_entity_pk, representative_package_id, creation_package_id, created_tx_ix, created_at_offset, signatories, observers, create_witnesses, creation_synchronizer_id, metadata, contract_key_json, contract_key_hash, divulged_only, source_kind, history_lower_bound) from stdin",
         headers(4) ==
           "/*4*/ copy __rel_contract_visibility (contract_pk, party, role) from stdin",
         headers(5) ==
@@ -93,7 +101,7 @@ object RelationalModelSpec extends ZIOSpecDefault:
     test("contract row encodes arrays, options, bytea, jsonb and divulged_only"):
       assertTrue(
         contract(factory.mk)._row ==
-          "1\tcid-1\t7\tpkg-1\t\\N\t5\t100\t{Alice,Bob}\t{Carol}\t{}\tsync-1\t\\\\x010F\t\"k\"\t\\N\tfalse\tstream"
+          "1\tcid-1\t7\tpkg-1\t\\N\t5\t100\t{Alice,Bob}\t{Carol}\t{}\tsync-1\t\\\\x010F\t\"k\"\t\\N\tfalse\tstream\tfalse"
       )
     ,
     test("IdPlaceholder.factory allocates consecutive ids for events and contracts"):
@@ -101,9 +109,10 @@ object RelationalModelSpec extends ZIOSpecDefault:
       assertTrue(f.mk.id == 1L, f.mk.id == 2L, f.mk.id == 3L)
     ,
     test("payload and interface-view rows target the resolved dynamic table name"):
-      val f       = factory
-      val payload = model.ContractPayload(specific.ContractPayload(f.mk, ujson.Str("x")), "rel_asset__asset__asset")
-      val view    = model.InterfaceView(specific.InterfaceView(f.mk, ujson.Str("v")), "relv_iface__iface__iface")
+      val f = factory
+      val payload =
+        model.ContractPayload(specific.ContractPayload(f.mk, ujson.Str("x")), "rel_asset__asset__asset")
+      val view = model.InterfaceView(specific.InterfaceView(f.mk, ujson.Str("v")), "relv_iface__iface__iface")
       assertTrue(
         payload._sql == "/*7*/ copy rel_asset__asset__asset (contract_pk, payload_json) from stdin",
         payload._row == "1\t\"x\"",
