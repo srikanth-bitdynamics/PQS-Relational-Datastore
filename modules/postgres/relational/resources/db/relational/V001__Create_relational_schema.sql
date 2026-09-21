@@ -128,6 +128,7 @@ create table __rel_exercises (
 
 create table __query_coverage (
     coverage_id                      bigserial primary key,
+    instance_id                      text,
     source_kind                      rel_source_kind not null,
     requested_from_offset            bigint,
     actual_from_offset               bigint,

@@ -136,7 +136,8 @@ declare
 begin
     lock table __rel_watermark in exclusive mode;
     select c.tx_ix from latest_checkpoint() c into latest_ix;
-    call __rel_delete_transactions_after(coalesce(latest_ix, 0));
+    -- a missing checkpoint means a crashed ACS seed; cutoff -1 wipes it including tx_ix=0 (cutoff 0 keeps a real one)
+    call __rel_delete_transactions_after(coalesce(latest_ix, -1));
     update __rel_watermark set instance_id = current_setting('scribe.instance');
 end;
 $$ language plpgsql;

@@ -10,10 +10,7 @@ import zio.test.*
 
 import scala.language.implicitConversions
 
-/** Keeps `modules/postgres/relational/resources/db/schema-dump.sql` in sync with the relational Flyway migrations.
-  * Regenerate with `REGENERATE_SCHEMA_DUMP=true mill pqs.functest.testOnly
-  * com.digitalasset.pqs.schema.postgres.relational.SchemaDumpSpec` and commit the result.
-  */
+/** Regenerate the checked-in dump with the `REGENERATE_SCHEMA_DUMP` env var; the failure message prints the command. */
 object SchemaDumpSpec extends SharedLedgerAndPostgresTest:
   private val asset = DamlSource(
     "Asset" -> """module Asset where

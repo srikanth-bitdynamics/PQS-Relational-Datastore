@@ -126,7 +126,8 @@ declare
 begin
     lock table __rel_watermark in exclusive mode;
     select c.tx_ix from latest_checkpoint() c into latest_ix;
-    call __rel_delete_transactions_after(coalesce(latest_ix, 0));
+    -- a missing checkpoint means a crashed ACS seed; cutoff -1 wipes it including tx_ix=0 (cutoff 0 keeps a real one)
+    call __rel_delete_transactions_after(coalesce(latest_ix, -1));
     update __rel_watermark set instance_id = current_setting('scribe.instance');
 end;
 $$;
@@ -316,6 +317,11 @@ begin
     from drained d
     where c.contract_id = d.contract_id and c.archived_tx_ix is null;
 
+    -- advance this writer's coverage so through_offset tracks committed progress, not the ledger end sampled at startup
+    update __query_coverage
+    set through_offset = new.ledger_offset
+    where instance_id = new.instance_id;
+
     return new;
 end;
 $$;
@@ -364,6 +370,7 @@ SET default_table_access_method = heap;
 
 CREATE TABLE pqs_relational.__query_coverage (
     coverage_id bigint NOT NULL,
+    instance_id text,
     source_kind pqs_relational.rel_source_kind NOT NULL,
     requested_from_offset bigint,
     actual_from_offset bigint,

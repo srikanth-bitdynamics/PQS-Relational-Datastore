@@ -39,6 +39,11 @@ begin
     from drained d
     where c.contract_id = d.contract_id and c.archived_tx_ix is null;
 
+    -- advance this writer's coverage so through_offset tracks committed progress, not the ledger end sampled at startup
+    update __query_coverage
+    set through_offset = new.ledger_offset
+    where instance_id = new.instance_id;
+
     return new;
 end;
 $$ language plpgsql;

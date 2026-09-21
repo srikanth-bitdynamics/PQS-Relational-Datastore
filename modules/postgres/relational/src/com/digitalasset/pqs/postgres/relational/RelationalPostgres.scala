@@ -61,16 +61,18 @@ final case class RelationalPostgres(
       case Datastore.Datasource.TransactionTreeStream => true
       case Datastore.Datasource.TransactionStream     => false
     tx(
+      // stamp the writer instance so the watermark trigger advances this run's row, not whatever row has the max id
       sql"""insert into __query_coverage (
-              source_kind, requested_from_offset, actual_from_offset, through_offset, source_pruned_offset,
+              instance_id, source_kind, requested_from_offset, actual_from_offset, through_offset, source_pruned_offset,
               acs_seed_offset, ingested_all_parties, ingested_parties, contract_filter, metadata_filter, tree_stream,
               create_history_complete, exercise_history_complete, archive_history_complete, archive_visibility_complete,
               reassignment_history_complete, assignment_origin_state_complete, started_at, completed_at)
             values (
+              (select instance_id from __rel_watermark),
               ${"stream"}::rel_source_kind, ${record.normalizedStart.toSqlValue}, ${record.actualStart.toSqlValue},
-              ${record.ledgerEnd.toSqlValue}, ${Option.empty[Long]}, ${record.acsSeedOffset.map(_.toSqlValue)},
+              ${record.actualStart.toSqlValue}, ${Option.empty[Long]}, ${record.acsSeedOffset.map(_.toSqlValue)},
               $allParties, ${parties}::text[], ${record.contractFilter}, ${record.metadataFilter}, $treeStream,
-              true, true, true, true, false, false, now(), null)""".update.unit
+              true, $treeStream, true, true, false, false, now(), null)""".update.unit
     )
 
   override def processAcs = (
@@ -330,7 +332,8 @@ final case class RelationalPostgres(
         c.payloads.headOption.fold(Chunk.empty[model.Model]) {
           case (templateId, _) =>
             val templateEntityPk = getEntityPk(templateId)
-            val contractPk       = placeholders.mk
+            // the contract reuses its create event's pk, so a create allocates one id, not two
+            val contractPk = eventPk
             val contract = model.Contract(
               specific.Contract(
                 contractPk = contractPk,
@@ -445,8 +448,11 @@ object RelationalPostgres:
           exerciseMap((id.packageId, id.moduleName, id.entityName, choice))
         _ <- logInfo(s"Initialised ${exercises.size} exercise types")
 
+        // events and contracts share one id space, so seed the allocator past the max of both tables
         lastId <- transaction {
-          sql"select coalesce(max(event_pk), 0) from __query_events".query[Long].selectOne.someOrElse(0L)
+          sql"""select greatest(
+                  coalesce((select max(event_pk) from __query_events), 0),
+                  coalesce((select max(contract_pk) from __rel_contracts), 0))""".query[Long].selectOne.someOrElse(0L)
         }
         placeholders = IdPlaceholder.factory(lastId + 1)
       yield RelationalPostgres(
