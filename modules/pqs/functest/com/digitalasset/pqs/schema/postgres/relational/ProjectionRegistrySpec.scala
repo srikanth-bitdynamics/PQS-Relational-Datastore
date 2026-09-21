@@ -43,7 +43,7 @@ object ProjectionRegistrySpec extends SharedLedgerAndPostgresTest:
         Postgres.query(
           for
             _       <- sql"set search_path to pqs_relational".execute
-            version <- ProjectionRegistry.insertDraft(definition, "hash-1", ujson.Obj(), 1)
+            version <- ProjectionRegistry.insertDraft(definition, "hash-1", "shape-1", ujson.Obj(), 1)
             rows    <- ProjectionRegistry.list
             one     <- ProjectionRegistry.get(version)
           yield assertTrue(

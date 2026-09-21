@@ -25,7 +25,7 @@ object WriterConnectionLossSpec extends FuncTest[Postgres]:
             _ <- ProductionPool.relationalSchema
             version <- transact {
               for
-                v <- ProjectionRegistry.insertDraft(ujson.Obj(), "draft", ujson.Obj(), 1)
+                v <- ProjectionRegistry.insertDraft(ujson.Obj(), "draft", "shape-draft", ujson.Obj(), 1)
                 _ <- ProjectionRegistry.setBackfilledThrough(v, 0L)
               yield v
             }
