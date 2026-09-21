@@ -88,6 +88,30 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
           retired.contains("retired")
         )
     },
+    funcTest("an abandoned building index with no recorded identity is recovered and dropped") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup *> ddl("create index abandoned_build on payload (owner)")
+          _ <- transact(
+            sql"""insert into __rel_managed_index
+                    (projection_version, table_name, index_name, definition, columns, status, adopted, created_at)
+                  values (1, 'payload', 'abandoned_build', 'abandoned', array['owner'],
+                          'building'::rel_index_status, false, now())""".update
+          )
+          _        <- IndexManager.build *> IndexManager.adopt
+          stranded <- status("abandoned_build")
+          report   <- IndexManager.retire
+          after    <- status("abandoned_build")
+          exists   <- transact(sql"select to_regclass('abandoned_build') is not null".query[Boolean].selectOne)
+        yield assertTrue(
+          stranded.contains("retiring"),
+          report.contains("Retired 1"),
+          after.contains("retired"),
+          exists.contains(false)
+        )
+    },
     funcTest("an unmanaged same-name index is neither adopted nor deleted") {
       Given:
         Postgres.database >+> ProductionPool.layer()

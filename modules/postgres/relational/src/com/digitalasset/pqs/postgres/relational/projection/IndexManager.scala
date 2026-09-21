@@ -261,10 +261,11 @@ object IndexManager:
         active <- planActive
         planned = active.toList.flatMap(_._2.indexes.map(_.name)).toSet
         candidates <-
-          sql"select index_name, table_name, physical_oid::bigint from __rel_managed_index where status = 'retiring'::rel_index_status"
-            .query[(String, String, Option[Long])]
+          sql"""select index_name, table_name, physical_oid is null, coalesce(physical_oid::bigint, 0)
+                from __rel_managed_index where status = 'retiring'::rel_index_status"""
+            .query[(String, String, Boolean, Long)]
             .selectAll
-            .map(_.toSeq)
+            .map(_.map((name, table, unknown, oid) => (name, table, if unknown then None else Some(oid))).toSeq)
         results <- ZIO.foreach(candidates.filterNot(c => planned.contains(c._1))) { (name, table, oid) =>
           (verifyOwnership(schema, name, table, oid) *> runConcurrently(dropDdl(schema, name))).either.map(name -> _)
         }
@@ -476,9 +477,17 @@ object IndexManager:
       .selectOne
       .flatMap {
         case None => ZIO.unit
-        case Some((oid, actualTable, sameSchema))
-            if expectedOid.contains(oid) && (actualTable === table) && sameSchema =>
-          ZIO.unit
+        case Some((oid, actualTable, sameSchema)) if (actualTable === table) && sameSchema =>
+          expectedOid match
+            case Some(recorded) if recorded === oid => ZIO.unit
+            case Some(_) =>
+              ZIO.fail(
+                new RuntimeException(s"Refusing to drop $schema.$name: physical index ownership changed")
+              )
+            case None =>
+              sql"""update __rel_managed_index set physical_oid = ${oid}::oid
+                    where index_name = $name and table_name = $table
+                      and status = 'retiring'::rel_index_status and physical_oid is null""".update.unit
         case _ =>
           ZIO.fail(
             new RuntimeException(s"Refusing to drop $schema.$name: physical index ownership is unverified or changed")
