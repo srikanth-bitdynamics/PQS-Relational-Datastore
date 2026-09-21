@@ -2,6 +2,8 @@
 
 The relational backend exposes SQL views. An HTTP Query API and document-to-relational migration tooling are not available.
 
+For initial setup and query examples, see the [relational datastore guide](README.md).
+
 ## Compatible upgrades
 
 Apply the projection, run its resumable backfill, stop ingestion, and activate it. Activation requires backfill through the current published watermark. If ingestion advanced after backfill, catch up before activation. Start ingestion again after activation.

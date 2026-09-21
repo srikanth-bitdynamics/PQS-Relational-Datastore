@@ -8,6 +8,8 @@ PQS enhances the ledger by connecting it with the world of the SQL database. Thi
 
 See [official documentation](https://docs.canton.network/sdks-tools/development-tools/pqs) for instructions on how to use PQS.
 
+For the relational datastore, see [setup and querying](modules/postgres/relational/README.md).
+
 ## Contributing
 
 If you wish to build, not just use PQS, the following [resources](#resources) may be of interest:
