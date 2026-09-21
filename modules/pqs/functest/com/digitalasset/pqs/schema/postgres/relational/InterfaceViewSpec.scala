@@ -103,6 +103,52 @@ object InterfaceViewSpec extends SharedLedgerAndPostgresTest:
             "view_rows"          | "1"
           }
         )
+    },
+    funcTest("an interface filter also delivers the implementing template's payload via the schema closure") {
+      val alice = Party("Alice")
+      Given:
+        DamlSdk.dar(tmpls) ++ DamlSdk.parties(alice) ++ Postgres.database >+> DamlSdk.deploy
+      And:
+        DamlSdk.runScript("Tmpls:setup", alice.id)
+      And:
+        // Filtering only by the interface still pulls the implementing template into the subscription, so the ledger
+        // delivers the template create argument alongside the view. This is the invariant the by-identity payload
+        // routing relies on: a create always carries its template payload, routed to the base table by entity kind.
+        Pqs.runRelationalPipeline(
+          "--pipeline-datasource=TransactionTreeStream",
+          "--pipeline-ledger-start=Genesis",
+          "--pipeline-ledger-stop=Latest",
+          "--pipeline-filter-contracts=Ifaces.IAsset"
+        )
+      Then:
+        FuncTest.retryUntilTimeout(
+          (for
+            base <- Postgres.query(
+              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'Token' and kind = 'template'"
+                .query[String]
+                .selectOne
+            )
+            view <- Postgres.query(
+              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'IAsset' and kind = 'interface'"
+                .query[String]
+                .selectOne
+            )
+            b = Syntax(base.getOrElse("__nobase"))
+            v = Syntax(view.getOrElse("__noview"))
+            result <- Postgres.query(sql"""
+              select 'contract_rows' as k, (select count(*)::text from pqs_relational.__rel_contracts) as v
+              union all select 'base_rows', (select count(*)::text from pqs_relational.$b)
+              union all select 'view_rows', (select count(*)::text from pqs_relational.$v)
+              order by k
+            """)
+          yield result) `returns` table {
+            "key"           | "value"
+            ---             | ---
+            "base_rows"     | "1"
+            "contract_rows" | "1"
+            "view_rows"     | "1"
+          }
+        )
     }
   )
 end InterfaceViewSpec

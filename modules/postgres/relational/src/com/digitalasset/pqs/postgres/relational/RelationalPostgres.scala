@@ -31,6 +31,7 @@ final case class RelationalPostgres(
     getExercisePk: (Identifier, ChoiceName) => specific.EntityTypePk,
     getBaseTable: Identifier => String,
     getViewTable: Identifier => String,
+    isTemplate: Identifier => Boolean,
     placeholders: IdPlaceholder.Factory
 ) extends Datastore:
   import com.digitalasset.pqs.postgres.relational.specific.{offsetEncoder, toSqlValue}
@@ -337,58 +338,61 @@ final case class RelationalPostgres(
 
     event match
       case c: canonical.specific.Event.Created =>
-        c.payloads.headOption.fold(Chunk.empty[model.Model]) {
-          case (templateId, templateDv) =>
-            val templateEntityPk = getEntityPk(templateId)
-            // the contract reuses its create event's pk, so a create allocates one id, not two
-            val contractPk = eventPk
-            val contract = model.Contract(
-              specific.Contract(
-                contractPk = contractPk,
-                contractId = c.contractId,
-                templateEntityPk = templateEntityPk,
-                representativePackageId = c.representativePackageId,
-                creationPackageId = c.creationPackageId,
-                createdAtIx = txIx,
-                createdAtOffset = sourceKind match
-                  case model.SourceKind.AcsSeed => None
-                  case _                        => Some(c.eventId._1),
-                signatories = c.signatories,
-                observers = c.observers,
-                createWitnesses = c.witnesses,
-                metadata = c.metadata,
-                contractKey = (codec.getTemplateKey(templateId) zip c.contractKey).map(_ `fromDynamicValue` _),
-                contractKeyHash = codec.getTemplateKey(templateId).flatMap(_ => c.contractKeyHash),
-                acsDelta = c.acsDelta,
-                sourceKind = sourceKind,
-                synchronizerId = synchronizerId
-              )
+        // Route each payload by entity kind rather than position: the template's create argument goes to the base
+        // table, each interface view to its view table. PQS's schema closure pulls an interface's implementing
+        // templates into every subscription, so a create always carries its template payload; classifying by kind
+        // avoids depending on the payload ordering to hold that invariant.
+        c.payloads.find { (id, _) => isTemplate(id) }.fold(Chunk.empty[model.Model]) { (templateId, templateDv) =>
+          val templateEntityPk = getEntityPk(templateId)
+          // the contract reuses its create event's pk, so a create allocates one id, not two
+          val contractPk = eventPk
+          val contract = model.Contract(
+            specific.Contract(
+              contractPk = contractPk,
+              contractId = c.contractId,
+              templateEntityPk = templateEntityPk,
+              representativePackageId = c.representativePackageId,
+              creationPackageId = c.creationPackageId,
+              createdAtIx = txIx,
+              createdAtOffset = sourceKind match
+                case model.SourceKind.AcsSeed => None
+                case _                        => Some(c.eventId._1),
+              signatories = c.signatories,
+              observers = c.observers,
+              createWitnesses = c.witnesses,
+              metadata = c.metadata,
+              contractKey = (codec.getTemplateKey(templateId) zip c.contractKey).map(_ `fromDynamicValue` _),
+              contractKeyHash = codec.getTemplateKey(templateId).flatMap(_ => c.contractKeyHash),
+              acsDelta = c.acsDelta,
+              sourceKind = sourceKind,
+              synchronizerId = synchronizerId
             )
-            val contractVisibility =
-              c.signatories.map(p =>
-                model.ContractVisibility(specific.ContractVisibility(contractPk, p, model.VisibilityRole.Signatory))
+          )
+          val contractVisibility =
+            c.signatories.map(p =>
+              model.ContractVisibility(specific.ContractVisibility(contractPk, p, model.VisibilityRole.Signatory))
+            ) ++
+              c.observers.map(p =>
+                model.ContractVisibility(specific.ContractVisibility(contractPk, p, model.VisibilityRole.Observer))
               ) ++
-                c.observers.map(p =>
-                  model.ContractVisibility(specific.ContractVisibility(contractPk, p, model.VisibilityRole.Observer))
-                ) ++
-                c.witnesses.map(p =>
-                  model.ContractVisibility(specific.ContractVisibility(contractPk, p, model.VisibilityRole.Witness))
-                )
-            val payload = model.ContractPayload(
-              specific.ContractPayload(contractPk, codec.template(templateId).fromDynamicValue(templateDv)),
-              getBaseTable(templateId)
-            )
-            val views = c.payloads.drop(1).map { (interfaceId, viewDv) =>
-              model.InterfaceView(
-                specific.InterfaceView(contractPk, codec.template(interfaceId).fromDynamicValue(viewDv)),
-                getViewTable(interfaceId)
+              c.witnesses.map(p =>
+                model.ContractVisibility(specific.ContractVisibility(contractPk, p, model.VisibilityRole.Witness))
               )
-            }
-            Chunk(
-              eventRow(c.eventId, c.contractId, templateEntityPk, model.EventKind.Create, None),
-              contract,
-              payload
-            ) ++ views ++ eventVisibility(c.witnesses) ++ contractVisibility
+          val payload = model.ContractPayload(
+            specific.ContractPayload(contractPk, codec.template(templateId).fromDynamicValue(templateDv)),
+            getBaseTable(templateId)
+          )
+          val views = c.payloads.filter { (id, _) => !isTemplate(id) }.map { (interfaceId, viewDv) =>
+            model.InterfaceView(
+              specific.InterfaceView(contractPk, codec.template(interfaceId).fromDynamicValue(viewDv)),
+              getViewTable(interfaceId)
+            )
+          }
+          Chunk(
+            eventRow(c.eventId, c.contractId, templateEntityPk, model.EventKind.Create, None),
+            contract,
+            payload
+          ) ++ views ++ eventVisibility(c.witnesses) ++ contractVisibility
         }
 
       case a: canonical.specific.Event.Archived =>
@@ -455,6 +459,7 @@ object RelationalPostgres:
         baseTableMap = entities.map((pkg, module, entity, _, tbl) => (pkg, module, entity) -> tbl).toMap
         getEntityPk  = (id: Identifier) => entityMap((id.packageId, id.moduleName, id.entityName))
         getBaseTable = (id: Identifier) => baseTableMap((id.packageId, id.moduleName, id.entityName))
+        isTemplate   = (id: Identifier) => entityMap.contains((id.packageId, id.moduleName, id.entityName))
         _ <- logInfo(s"Initialised ${entities.size} template entity types")
 
         interfaces <- transaction {
@@ -498,6 +503,7 @@ object RelationalPostgres:
         getExercisePk,
         getBaseTable,
         getViewTable,
+        isTemplate,
         placeholders
       )
     }
