@@ -1,0 +1,271 @@
+// Copyright (c) 2026 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package com.digitalasset.pqs.features.upgrades
+
+import com.digitalasset.pqs.docker.{Docker, Service}
+import com.digitalasset.pqs.functest.FTEnv
+import com.digitalasset.pqs.services.daml.*
+import com.digitalasset.pqs.services.postgres.*
+import zio.*
+import zio.jdbc.SqlFragment.Segment.Syntax
+import zio.jdbc.sqlInterpolator
+
+/** Shared two-participant RPID fixture used by both the document and relational representative-package-id specs.
+  *
+  * Boots a two-participant Canton with a custom bootstrap that produces, on participant2, a contract whose
+  * representative package (v2) differs from its creation package (v1) via offline party replication and ACS import.
+  */
+object TwoParticipantRpid:
+
+  val packageV1 = DamlSource(
+    "RpidTest" ->
+      """module RpidTest where
+        |
+        |template SimpleContract
+        |  with
+        |    owner : Party
+        |  where
+        |    signatory owner
+        |    choice Consume : ()
+        |      controller owner
+        |      do pure ()
+        |""".stripMargin
+  )
+
+  val packageV2 = DamlSource(
+    "RpidTest" ->
+      """module RpidTest where
+        |
+        |import Daml.Script
+        |
+        |template SimpleContract
+        |  with
+        |    owner : Party
+        |    description : Optional Text
+        |  where
+        |    signatory owner
+        |    choice Consume : ()
+        |      controller owner
+        |      do pure ()
+        |
+        |create : Party -> Script ()
+        |create p = do
+        |  _ <- submit p $ createCmd SimpleContract with owner = p, description = None
+        |  pure ()
+        |
+        |consumeAll : Party -> Script ()
+        |consumeAll p = do
+        |  contracts <- query @SimpleContract p
+        |  mapA (\(cid, _) -> submit p $ exerciseCmd cid Consume) contracts
+        |  pure ()
+        |""".stripMargin
+  ).upgrades(packageV1)
+
+  /** Two-participant Canton layer with Postgres storage (required for ACS import).
+    *
+    * Uses the captured v1 and v2 DARs, generates two-participant HOCON config + bootstrap script, and starts Canton.
+    * Participant2 is on port 6865 (Pqs-facing), participant1 on port 7865 (internal only).
+    *
+    * The bootstrap script uses canonical offline party replication:
+    *   - Creates the synchronizer and connects both participants
+    *   - Uploads v1 to participant1, v2 to participant2
+    *   - Allocates Alice on participant1
+    *   - Creates a contract on participant1 using v1 template (before replication)
+    *   - Replicates Alice to participant2 with onboarding flag (target proposes, disconnect, source proposes)
+    *   - Exports ACS via parties.export_party_acs, imports via parties.import_party_acs
+    *   - Reconnects participant2 and clears onboarding flag
+    *
+    * This results in participant2 having a contract with v2 as representative package and v1 as creation package.
+    */
+  def cantonParticipantWithACSImportContract(
+      alice: Party,
+      v1Dar: DarFile,
+      v2Dar: DarFile
+  ): RLayer[FTEnv & Docker & Postgres, Service[Ledger] & DeployedDar & Parties] =
+    ZLayer
+      .fromZIO(
+        for
+          showCantonLogs <- FTEnv.showCantonLogs
+          pg             <- ZIO.service[Postgres]
+          pgHostname = pg.container.hostName
+          cnt <- Docker.share("rpid_canton_cnt")(Ref.Synchronized.make(0)).flatMap(_.updateAndGet(_ + 1))
+          hostname = s"rpid-canton-$cnt"
+          dbP1     = s"canton_p1_$cnt"
+          dbP2     = s"canton_p2_$cnt"
+          _ <- pg.adminDatabase.autoCommit(
+            sql"""CREATE DATABASE "${Syntax(dbP1)}"""".execute *>
+              sql"""CREATE DATABASE "${Syntax(dbP2)}"""".execute
+          )
+          ca              <- Docker.certificateAuthority
+          participantCert <- ca.generate("participant", Seq(hostname, "localhost", "127.0.0.1", "0.0.0.0"))
+          adminCert       <- ca.generate("participant", Seq(hostname, "127.0.0.1"))
+          domainCert      <- ca.generate("participant", Seq(hostname, "127.0.0.1"))
+          pgClientCert    <- ca.generate("postgresclient")
+          certFiles = Seq(
+            os.root / "tls" / "root-ca.crt"      -> ca.certificate.crt,
+            os.root / "tls" / "participant.pem"  -> participantCert.certificate.pem,
+            os.root / "tls" / "participant.crt"  -> participantCert.certificate.crt,
+            os.root / "tls" / "admin-client.pem" -> adminCert.certificate.pem,
+            os.root / "tls" / "admin-client.crt" -> adminCert.certificate.crt,
+            os.root / "tls" / "domain.pem"       -> domainCert.certificate.pem,
+            os.root / "tls" / "domain.crt"       -> domainCert.certificate.crt,
+            os.root / "tls" / "pg-client.crt"    -> pgClientCert.certificate.crt,
+            os.root / "tls" / "pg-client.der"    -> pgClientCert.certificate.der
+          )
+          cantonConf <- CantonConf()
+          appConf     = cantonConf.twoParticipantsConfigOnly(pgHostname, Postgres.port, dbP1, dbP2)
+          bootstrapSc = bootstrapScript("rpiddomain")
+          prepopulateFiles = certFiles ++ Seq(
+            os.root / "app" / "app.conf"     -> appConf,
+            os.root / "app" / "bootstrap.sc" -> bootstrapSc,
+            os.root / "dars" / "v1.dar"      -> v1Dar.darBytes,
+            os.root / "dars" / "v2.dar"      -> v2Dar.darBytes
+          )
+          svc = Docker
+            .service[Ledger](
+              image = cantonConf.cantonDockerImage,
+              exposePorts = Set(CantonConf.participantPort),
+              prepopulateFiles = prepopulateFiles,
+              hostname = Some(hostname),
+              env = CantonConf.cantonEnvVarMap,
+              user = Some(1001),
+              suppressOutput = !showCantonLogs
+            )("daemon")
+            .tap(_.get.blockUntilStdOut(_.contains(CantonConf.bootstrapCompleteMessage)))
+        yield svc
+      )
+      .flatten >+> (DamlSdk.allocatedParties(alice) ++ ZLayer.succeed(DeployedDar(v2Dar)))
+
+  private def bootstrapScript(synchronizer: String): String =
+    s"""import com.digitalasset.canton.version.ProtocolVersion
+       |import com.digitalasset.canton.config
+       |
+       |def main() = {
+       |  nodes.local.start()
+       |
+       |  // 1. Create synchronizer
+       |  val synchronizerId = bootstrap.synchronizer(
+       |    synchronizerName = "$synchronizer",
+       |    sequencers = Seq(sequencer1),
+       |    mediators = Seq(mediator1),
+       |    synchronizerOwners = Seq(sequencer1),
+       |    synchronizerThreshold = PositiveInt.one,
+       |    staticSynchronizerParameters = StaticSynchronizerParameters.defaultsWithoutKMS(ProtocolVersion.forSynchronizer)
+       |  )
+       |
+       |  // Set reconciliation interval to 10 years to avoid ACS commitment mismatch warnings
+       |  val longReconciliationInterval = config.PositiveDurationSeconds.ofHours(24 * 365 * 10)
+       |  sequencer1.topology.synchronizer_parameters
+       |    .propose_update(synchronizerId.logical, _.update(reconciliationInterval = longReconciliationInterval))
+       |
+       |  // 2. Connect both participants
+       |  logger.info("=== connecting participants to synchronizer ===")
+       |  participant1.synchronizers.connect_local(sequencer1, alias = "$synchronizer")
+       |  participant2.synchronizers.connect_local(sequencer1, alias = "$synchronizer")
+       |  utils.retry_until_true { participant1.synchronizers.active("$synchronizer") }
+       |  utils.retry_until_true { participant2.synchronizers.active("$synchronizer") }
+       |
+       |  // 3. Upload DARs: v1 to participant1, v2 to participant2
+       |  logger.info("=== uploading DARs ===")
+       |  val v1PkgId = participant1.dars.upload("/dars/v1.dar")
+       |  participant2.dars.upload("/dars/v2.dar")
+       |
+       |  // 4. Allocate Alice on participant1
+       |  val alice = participant1.parties.enable("Alice")
+       |
+       |  // 5. Create contract on participant1 using v1 template (before replication)
+       |  logger.info("=== creating contract on participant1 ===")
+       |  participant1.ledger_api.commands.submit(
+       |    actAs = Seq(alice),
+       |    commands = Seq(
+       |      ledger_api_utils.create(
+       |        v1PkgId,
+       |        "RpidTest",
+       |        "SimpleContract",
+       |        Map[String, Any](
+       |          "owner" -> alice,
+       |        ),
+       |      )
+       |    ),
+       |  )
+       |
+       |  // 6. Target (P2) authorizes hosting Alice with onboarding flag
+       |  logger.info("=== replicating party to participant2 ===")
+       |  participant2.topology.party_to_participant_mappings.propose_delta(
+       |    party = alice,
+       |    adds = List((participant2.id, ParticipantPermission.Submission)),
+       |    store = synchronizerId,
+       |    requiresPartyToBeOnboarded = true,
+       |  )
+       |
+       |  // 7. Disconnect target
+       |  participant2.synchronizers.disconnect_all()
+       |
+       |  // 8. Record source ledger end
+       |  val sourceLedgerEnd = participant1.ledger_api.state.end()
+       |
+       |  // 9. Source (P1) authorizes hosting Alice on P2 with onboarding flag
+       |  participant1.topology.party_to_participant_mappings.propose_delta(
+       |    party = alice,
+       |    adds = List((participant2.id, ParticipantPermission.Submission)),
+       |    store = synchronizerId,
+       |    requiresPartyToBeOnboarded = true,
+       |  )
+       |
+       |  // 10. Export ACS from source
+       |  logger.info("=== exporting ACS from participant1 ===")
+       |  participant1.parties.export_party_acs(
+       |    party = alice,
+       |    synchronizerId = synchronizerId.logical,
+       |    targetParticipantId = participant2.id,
+       |    beginOffsetExclusive = sourceLedgerEnd,
+       |    exportFilePath = "/app/acs-export.gz",
+       |  )
+       |
+       |  // 11. Import ACS on target (P2 already disconnected from step 7)
+       |  logger.info("=== importing ACS into participant2 ===")
+       |  participant2.parties.import_party_acs(
+       |    importFilePath = "/app/acs-export.gz",
+       |    synchronizerId = synchronizerId.logical,
+       |  )
+       |
+       |  // 12. Capture target ledger end (after import, before reconnect)
+       |  val targetLedgerEnd = participant2.ledger_api.state.end()
+       |
+       |  // 13. Reconnect target
+       |  participant2.synchronizers.reconnect_all()
+       |  utils.retry_until_true { participant2.synchronizers.active("$synchronizer") }
+       |
+       |  // 14. Clear onboarding flag (poll until cleared)
+       |  logger.info("=== clearing onboarding flag ===")
+       |  utils.retry_until_true(timeout = 2.minutes, maxWaitPeriod = 1.minutes) {
+       |    participant2.parties.clear_party_onboarding_flag(alice, synchronizerId.logical, targetLedgerEnd) match {
+       |      case FlagSet(_) => false
+       |      case FlagNotSet => true
+       |    }
+       |  }
+       |
+       |  // 15. Remove Alice from participant1 so she's only hosted on participant2
+       |  logger.info("=== removing Alice from participant1 ===")
+       |  participant1.topology.party_to_participant_mappings.propose_delta(
+       |    party = alice,
+       |    removes = List(participant1.id),
+       |    store = synchronizerId,
+       |    forceFlags = ForceFlags(ForceFlag.DisablePartyWithActiveContracts),
+       |  )
+       |  utils.retry_until_true {
+       |    !participant1.parties.list(filterParticipant = participant1.id.filterString).exists(_.party == alice)
+       |  }
+       |
+       |  // 16. Wait for party to be visible on P2
+       |  logger.info("=== waiting for party activation ===")
+       |  utils.retry_until_true {
+       |    participant2.parties.list(filterParticipant = participant2.id.filterString).exists(_.party == alice)
+       |  }
+       |
+       |  logger.info("${CantonConf.bootstrapCompleteMessage}")
+       |}
+       |""".stripMargin
+
+end TwoParticipantRpid
