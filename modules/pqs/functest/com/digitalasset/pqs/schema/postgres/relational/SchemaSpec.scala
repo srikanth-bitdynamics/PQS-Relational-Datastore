@@ -8,6 +8,7 @@ import com.digitalasset.pqs.services.daml.{DamlSdk, DamlSource, Party}
 import com.digitalasset.pqs.services.postgres.Postgres
 import com.digitalasset.pqs.services.pqs.Pqs
 import zio.jdbc.*
+import zio.jdbc.SqlFragment.Segment.Syntax
 import zio.test.*
 
 import scala.language.{implicitConversions, postfixOps}
@@ -102,6 +103,39 @@ object SchemaSpec extends SharedLedgerAndPostgresTest:
             "archived"           | "1"
             "consuming_exercise" | "1"
           }
+        )
+      And:
+        // the create payload lands as jsonb in the per-template base table
+        FuncTest.retryUntilTimeout(
+          for
+            tbl <- Postgres.query(
+              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'Ping' and kind = 'template'"
+                .query[String]
+                .selectOne
+            )
+            cnt <- Postgres.query(
+              sql"""select count(*)::text from pqs_relational.${Syntax(tbl.getOrElse("__missing"))}
+                    where payload_json ->> 'owner' = ${alice.id}""".query[String].selectOne
+            )
+          yield assertTrue(tbl.isDefined, cnt.contains("1"))
+        )
+      When:
+        // deleting the contract cascades to its typed payload row (on delete cascade)
+        Postgres.call(sql"delete from pqs_relational.__rel_contracts")
+      Then:
+        FuncTest.retryUntilTimeout(
+          for
+            tbl <- Postgres.query(
+              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'Ping' and kind = 'template'"
+                .query[String]
+                .selectOne
+            )
+            cnt <- Postgres.query(
+              sql"select count(*)::text from pqs_relational.${Syntax(tbl.getOrElse("__missing"))}"
+                .query[String]
+                .selectOne
+            )
+          yield assertTrue(cnt.contains("0"))
         )
   )
 end SchemaSpec

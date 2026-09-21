@@ -228,6 +228,7 @@ CREATE PROCEDURE pqs_relational.__rel_initialize_entity(IN package_name text, IN
     AS $$
 declare
     entity bigint;
+    tbl    text;
 begin
     select pk from __rel_entity e
     where e.package_name = __rel_initialize_entity.package_name
@@ -236,8 +237,24 @@ begin
       and e.kind = __rel_initialize_entity.kind
     into entity;
     if entity is null then
-        insert into __rel_entity(package_name, module_name, entity_name, kind)
-        values (package_name, module_name, entity_name, kind);
+        tbl := __rel_typed_table_name(package_name, module_name, entity_name, kind);
+        insert into __rel_entity(package_name, module_name, entity_name, kind, base_table)
+        values (package_name, module_name, entity_name, kind, tbl);
+        if kind = 'template' then
+            execute format(
+                'create table if not exists %I (
+                     contract_pk  bigint primary key references __rel_contracts (contract_pk) on delete cascade,
+                     payload_json jsonb not null)',
+                tbl
+            );
+        else
+            execute format(
+                'create table if not exists %I (
+                     contract_pk bigint primary key references __rel_contracts (contract_pk) on delete cascade,
+                     view_json   jsonb not null)',
+                tbl
+            );
+        end if;
     end if;
 end;
 $$;
@@ -287,6 +304,38 @@ begin
     if pkg is null then
         insert into __rel_package(name, version, id) values (package_name, package_version, package_id);
     end if;
+end;
+$$;
+
+
+--
+-- Name: __rel_typed_table_name(text, text, text, pqs_relational.rel_entity_kind); Type: FUNCTION; Schema: pqs_relational; Owner: -
+--
+
+CREATE FUNCTION pqs_relational.__rel_typed_table_name(package_name text, module_name text, entity_name text, kind pqs_relational.rel_entity_kind) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+declare
+    prefix    text := case when kind = 'interface' then 'relv_' else 'rel_' end;
+    raw       text := package_name || ':' || module_name || ':' || entity_name;
+    lp        text := lower(package_name);
+    lm        text := lower(module_name);
+    le        text := lower(entity_name);
+    sp        text := regexp_replace(lp, '[^a-z0-9]', '_', 'g');
+    sm        text := regexp_replace(lm, '[^a-z0-9]', '_', 'g');
+    se        text := regexp_replace(le, '[^a-z0-9]', '_', 'g');
+    slug      text := sp || '__' || sm || '__' || se;
+    candidate text := prefix || slug;
+    lossless  boolean := sp = lp and sm = lm and se = le
+                     and position('__' in lp) = 0
+                     and position('__' in lm) = 0
+                     and position('__' in le) = 0;
+    budget    int := 63 - length(prefix) - 14;
+begin
+    if lossless and length(candidate) <= 63 then
+        return candidate;
+    end if;
+    return prefix || left(slug, budget) || '_h' || left(md5(raw), 12);
 end;
 $$;
 
@@ -537,7 +586,8 @@ CREATE TABLE pqs_relational.__rel_entity (
     package_name text NOT NULL,
     module_name text NOT NULL,
     entity_name text NOT NULL,
-    kind pqs_relational.rel_entity_kind NOT NULL
+    kind pqs_relational.rel_entity_kind NOT NULL,
+    base_table text
 );
 
 
@@ -761,6 +811,16 @@ CREATE TABLE pqs_relational.flyway_schema_history (
 
 
 --
+-- Name: rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb40345; Type: TABLE; Schema: pqs_relational; Owner: -
+--
+
+CREATE TABLE pqs_relational.rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb40345 (
+    contract_pk bigint NOT NULL,
+    payload_json jsonb NOT NULL
+);
+
+
+--
 -- Name: __query_coverage coverage_id; Type: DEFAULT; Schema: pqs_relational; Owner: -
 --
 
@@ -979,6 +1039,14 @@ ALTER TABLE ONLY pqs_relational.flyway_schema_history
 
 
 --
+-- Name: rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb40345 rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb_pkey; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb40345
+    ADD CONSTRAINT rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb_pkey PRIMARY KEY (contract_pk);
+
+
+--
 -- Name: __query_event_visibility_party_idx; Type: INDEX; Schema: pqs_relational; Owner: -
 --
 
@@ -1100,6 +1168,14 @@ ALTER TABLE ONLY pqs_relational.__rel_exercises
 
 ALTER TABLE ONLY pqs_relational.__rel_exercises
     ADD CONSTRAINT __rel_exercises_contract_template_entity_pk_fkey FOREIGN KEY (contract_template_entity_pk) REFERENCES pqs_relational.__rel_entity(pk);
+
+
+--
+-- Name: rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb40345 rel_com_digitalasset_pqs_schema_postgres_relat_contract_pk_fkey; Type: FK CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.rel_com_digitalasset_pqs_schema_postgres_relation_h4e2efdb40345
+    ADD CONSTRAINT rel_com_digitalasset_pqs_schema_postgres_relat_contract_pk_fkey FOREIGN KEY (contract_pk) REFERENCES pqs_relational.__rel_contracts(contract_pk) ON DELETE CASCADE;
 
 
 --

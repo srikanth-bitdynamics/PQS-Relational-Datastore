@@ -1,3 +1,34 @@
+create or replace function __rel_typed_table_name(
+    package_name text,
+    module_name text,
+    entity_name text,
+    kind rel_entity_kind
+) returns text as
+$$
+declare
+    prefix    text := case when kind = 'interface' then 'relv_' else 'rel_' end;
+    raw       text := package_name || ':' || module_name || ':' || entity_name;
+    lp        text := lower(package_name);
+    lm        text := lower(module_name);
+    le        text := lower(entity_name);
+    sp        text := regexp_replace(lp, '[^a-z0-9]', '_', 'g');
+    sm        text := regexp_replace(lm, '[^a-z0-9]', '_', 'g');
+    se        text := regexp_replace(le, '[^a-z0-9]', '_', 'g');
+    slug      text := sp || '__' || sm || '__' || se;
+    candidate text := prefix || slug;
+    lossless  boolean := sp = lp and sm = lm and se = le
+                     and position('__' in lp) = 0
+                     and position('__' in lm) = 0
+                     and position('__' in le) = 0;
+    budget    int := 63 - length(prefix) - 14;
+begin
+    if lossless and length(candidate) <= 63 then
+        return candidate;
+    end if;
+    return prefix || left(slug, budget) || '_h' || left(md5(raw), 12);
+end;
+$$ language plpgsql immutable parallel safe strict;
+
 create or replace procedure __rel_initialize_package(package_name text, package_version text, package_id text) as
 $$
 declare
@@ -21,6 +52,7 @@ create or replace procedure __rel_initialize_entity(
 $$
 declare
     entity bigint;
+    tbl    text;
 begin
     select pk from __rel_entity e
     where e.package_name = __rel_initialize_entity.package_name
@@ -29,8 +61,24 @@ begin
       and e.kind = __rel_initialize_entity.kind
     into entity;
     if entity is null then
-        insert into __rel_entity(package_name, module_name, entity_name, kind)
-        values (package_name, module_name, entity_name, kind);
+        tbl := __rel_typed_table_name(package_name, module_name, entity_name, kind);
+        insert into __rel_entity(package_name, module_name, entity_name, kind, base_table)
+        values (package_name, module_name, entity_name, kind, tbl);
+        if kind = 'template' then
+            execute format(
+                'create table if not exists %I (
+                     contract_pk  bigint primary key references __rel_contracts (contract_pk) on delete cascade,
+                     payload_json jsonb not null)',
+                tbl
+            );
+        else
+            execute format(
+                'create table if not exists %I (
+                     contract_pk bigint primary key references __rel_contracts (contract_pk) on delete cascade,
+                     view_json   jsonb not null)',
+                tbl
+            );
+        end if;
     end if;
 end;
 $$ language plpgsql;

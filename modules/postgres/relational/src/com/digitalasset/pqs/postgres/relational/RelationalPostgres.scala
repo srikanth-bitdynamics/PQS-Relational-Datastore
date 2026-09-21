@@ -29,6 +29,8 @@ final case class RelationalPostgres(
     codec: Dictionary[Codec[Value]],
     getEntityPk: Identifier => specific.EntityTypePk,
     getExercisePk: (Identifier, ChoiceName) => specific.EntityTypePk,
+    getBaseTable: Identifier => String,
+    getViewTable: Identifier => String,
     placeholders: IdPlaceholder.Factory
 ) extends Datastore:
   import com.digitalasset.pqs.postgres.relational.specific.{offsetEncoder, toSqlValue}
@@ -115,12 +117,16 @@ final case class RelationalPostgres(
           case Some(Offset.Genesis) =>
             tx(
               model.Model.prepareStatement(
-                Chunk(model.Transaction(specific.Transaction(Genesis._2, Offset.Genesis, None, None, None, None, None)))
+                Chunk(
+                  model.Transaction(
+                    specific.Transaction(Genesis._2, Offset.Genesis, None, None, None, None, None, None)
+                  )
+                )
               )
             ).as(Chunk.empty)
         } *> ZIO.attempt {
           chunk.collect {
-            case evt: canonical.specific.Event.Created => insertEvent(Genesis._2, model.SourceKind.AcsSeed, evt)
+            case evt: canonical.specific.Event.Created => insertEvent(Genesis._2, model.SourceKind.AcsSeed, None, evt)
             case offset: Offset.Absolute               => Chunk(model.Watermark(Genesis._2, offset, Seq.empty))
           }
         } @@ trackConvert
@@ -287,17 +293,19 @@ final case class RelationalPostgres(
         tx.effectiveAt,
         Some(tx.workflowId),
         tx.externalTransactionHash,
-        tx.paidTrafficCost
+        tx.paidTrafficCost,
+        tx.domainId
       ),
       Some(tx.span)
     )
-    val insertEvents    = tx.events.flatMap(evt => insertEvent(txIx, model.SourceKind.Stream, evt))
+    val insertEvents    = tx.events.flatMap(evt => insertEvent(txIx, model.SourceKind.Stream, tx.domainId, evt))
     val insertWatermark = model.Watermark(txIx, tx.offset, Seq(tx.seenAt))
     insertTx +: insertEvents :+ insertWatermark
 
   private def insertEvent(
       txIx: Long,
       sourceKind: model.SourceKind,
+      synchronizerId: Option[String],
       event: canonical.specific.Event | TreeEvent | ReassignmentEvent
   ): Chunk[model.Model] = {
     val eventPk = placeholders.mk
@@ -330,7 +338,7 @@ final case class RelationalPostgres(
     event match
       case c: canonical.specific.Event.Created =>
         c.payloads.headOption.fold(Chunk.empty[model.Model]) {
-          case (templateId, _) =>
+          case (templateId, templateDv) =>
             val templateEntityPk = getEntityPk(templateId)
             // the contract reuses its create event's pk, so a create allocates one id, not two
             val contractPk = eventPk
@@ -352,7 +360,8 @@ final case class RelationalPostgres(
                 contractKey = (codec.getTemplateKey(templateId) zip c.contractKey).map(_ `fromDynamicValue` _),
                 contractKeyHash = codec.getTemplateKey(templateId).flatMap(_ => c.contractKeyHash),
                 acsDelta = c.acsDelta,
-                sourceKind = sourceKind
+                sourceKind = sourceKind,
+                synchronizerId = synchronizerId
               )
             )
             val contractVisibility =
@@ -365,10 +374,21 @@ final case class RelationalPostgres(
                 c.witnesses.map(p =>
                   model.ContractVisibility(specific.ContractVisibility(contractPk, p, model.VisibilityRole.Witness))
                 )
+            val payload = model.ContractPayload(
+              specific.ContractPayload(contractPk, codec.template(templateId).fromDynamicValue(templateDv)),
+              getBaseTable(templateId)
+            )
+            val views = c.payloads.drop(1).map { (interfaceId, viewDv) =>
+              model.InterfaceView(
+                specific.InterfaceView(contractPk, codec.template(interfaceId).fromDynamicValue(viewDv)),
+                getViewTable(interfaceId)
+              )
+            }
             Chunk(
               eventRow(c.eventId, c.contractId, templateEntityPk, model.EventKind.Create, None),
-              contract
-            ) ++ eventVisibility(c.witnesses) ++ contractVisibility
+              contract,
+              payload
+            ) ++ views ++ eventVisibility(c.witnesses) ++ contractVisibility
         }
 
       case a: canonical.specific.Event.Archived =>
@@ -425,15 +445,28 @@ object RelationalPostgres:
         _ <- RelationalSchema.applySchema(poolConfig, instanceId, config.baseline) when config.autoApply
 
         entities <- transaction {
-          sql"""select pkg.id, e.module_name, e.entity_name, e.pk
+          sql"""select pkg.id, e.module_name, e.entity_name, e.pk, e.base_table
                 from __rel_entity e join __rel_package pkg on e.package_name = pkg.name
                 where e.kind = 'template'"""
-            .query[(String, String, String, specific.EntityTypePk)]
+            .query[(String, String, String, specific.EntityTypePk, String)]
             .selectAll
         }
-        entityMap   = entities.map((pkg, module, entity, pk) => (pkg, module, entity) -> pk).toMap
-        getEntityPk = (id: Identifier) => entityMap((id.packageId, id.moduleName, id.entityName))
+        entityMap    = entities.map((pkg, module, entity, pk, _) => (pkg, module, entity) -> pk).toMap
+        baseTableMap = entities.map((pkg, module, entity, _, tbl) => (pkg, module, entity) -> tbl).toMap
+        getEntityPk  = (id: Identifier) => entityMap((id.packageId, id.moduleName, id.entityName))
+        getBaseTable = (id: Identifier) => baseTableMap((id.packageId, id.moduleName, id.entityName))
         _ <- logInfo(s"Initialised ${entities.size} template entity types")
+
+        interfaces <- transaction {
+          sql"""select pkg.id, e.module_name, e.entity_name, e.base_table
+                from __rel_entity e join __rel_package pkg on e.package_name = pkg.name
+                where e.kind = 'interface'"""
+            .query[(String, String, String, String)]
+            .selectAll
+        }
+        viewTableMap = interfaces.map((pkg, module, entity, tbl) => (pkg, module, entity) -> tbl).toMap
+        getViewTable = (id: Identifier) => viewTableMap((id.packageId, id.moduleName, id.entityName))
+        _ <- logInfo(s"Initialised ${interfaces.size} interface entity types")
 
         exercises <- transaction {
           sql"""select pkg.id, e.module_name, e.entity_name, c.choice, c.pk
@@ -463,6 +496,8 @@ object RelationalPostgres:
         codec,
         getEntityPk,
         getExercisePk,
+        getBaseTable,
+        getViewTable,
         placeholders
       )
     }

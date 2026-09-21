@@ -40,7 +40,8 @@ object RelationalModelSpec extends ZIOSpecDefault:
       contractKey = Some(ujson.Str("k")),
       contractKeyHash = None,
       acsDelta = true,
-      sourceKind = model.SourceKind.Stream
+      sourceKind = model.SourceKind.Stream,
+      synchronizerId = Some("sync-1")
     )
   )
 
@@ -49,7 +50,16 @@ object RelationalModelSpec extends ZIOSpecDefault:
       val f = factory
       val headers = Seq(
         model.Transaction(
-          specific.Transaction(1L, com.digitalasset.canonical.specific.Offset.Absolute(100L), None, None, None, None, None)
+          specific.Transaction(
+            1L,
+            com.digitalasset.canonical.specific.Offset.Absolute(100L),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None
+          )
         )._sql,
         event(f.mk)._sql,
         model.EventVisibility(specific.EventVisibility(f.mk, Party("Alice")))._sql,
@@ -83,10 +93,21 @@ object RelationalModelSpec extends ZIOSpecDefault:
     test("contract row encodes arrays, options, bytea, jsonb and divulged_only"):
       assertTrue(
         contract(factory.mk)._row ==
-          "1\tcid-1\t7\tpkg-1\t\\N\t5\t100\t{Alice,Bob}\t{Carol}\t{}\t\\N\t\\\\x010F\t\"k\"\t\\N\tfalse\tstream"
+          "1\tcid-1\t7\tpkg-1\t\\N\t5\t100\t{Alice,Bob}\t{Carol}\t{}\tsync-1\t\\\\x010F\t\"k\"\t\\N\tfalse\tstream"
       )
     ,
     test("IdPlaceholder.factory allocates consecutive ids for events and contracts"):
       val f = factory
       assertTrue(f.mk.id == 1L, f.mk.id == 2L, f.mk.id == 3L)
+    ,
+    test("payload and interface-view rows target the resolved dynamic table name"):
+      val f       = factory
+      val payload = model.ContractPayload(specific.ContractPayload(f.mk, ujson.Str("x")), "rel_asset__asset__asset")
+      val view    = model.InterfaceView(specific.InterfaceView(f.mk, ujson.Str("v")), "relv_iface__iface__iface")
+      assertTrue(
+        payload._sql == "/*7*/ copy rel_asset__asset__asset (contract_pk, payload_json) from stdin",
+        payload._row == "1\t\"x\"",
+        view._sql == "/*8*/ copy relv_iface__iface__iface (contract_pk, view_json) from stdin",
+        view._row == "2\t\"v\""
+      )
   )

@@ -103,6 +103,9 @@ object model {
     case ContractVisibility extends Table("__rel_contract_visibility")
     case Exercises          extends Table("__rel_exercises")
     case TmpLifecycle       extends Table("__rel_tmp_lifecycle")
+    // per-template payload tables are named dynamically; these cases carry only the metrics label
+    case ContractPayload extends Table("rel_contract_payload")
+    case InterfaceView   extends Table("relv_interface_view")
 
   final class Transaction(tx: specific.Transaction, val span: Option[DetachedSpan] = None) extends Copy:
     val _table                   = Table.Transactions
@@ -147,6 +150,18 @@ object model {
     val _sql                     = s"/*6*/ copy ${_table.name} (${ev.columns.mkString(", ")}) from stdin"
     val _row                     = ev.rowValues
     val labels: Set[MetricLabel] = l("type" -> "archive")
+
+  final class ContractPayload(ev: specific.ContractPayload, tableName: String) extends Copy:
+    val _table                   = Table.ContractPayload
+    val _sql                     = s"/*7*/ copy $tableName (${ev.columns.mkString(", ")}) from stdin"
+    val _row                     = ev.rowValues
+    val labels: Set[MetricLabel] = l("type" -> "payload")
+
+  final class InterfaceView(ev: specific.InterfaceView, tableName: String) extends Copy:
+    val _table = Table.InterfaceView
+    val _sql   = s"/*8*/ copy $tableName (${ev.columns.mkString(", ")}) from stdin"
+    val _row   = ev.rowValues
+    val labels = Set.empty
 
   extension (models: Iterable[Model])
     def onlyTransactions(): Iterable[Transaction] = models.view.collect { case t: Transaction => t }
