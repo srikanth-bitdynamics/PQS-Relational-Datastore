@@ -394,8 +394,15 @@ object `package` extends RootModule { root =>
     }
 
     object relational extends PqsModule {
+      override def ivyDeps = Agg(
+        L.flyway.core,
+        L.flyway.driverPostgres,
+        L.classgraph
+      )
+
       override val moduleDeps = Seq(
         `app-blocks`.`composable-app`,
+        `app-blocks`.o11y,
         postgres.backend
       )
     }
