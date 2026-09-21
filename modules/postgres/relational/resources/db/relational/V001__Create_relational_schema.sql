@@ -155,7 +155,6 @@ create table __query_projection (
     projection_version    bigint primary key,
     definition            jsonb not null,
     definition_hash       text not null,
-    encoding_flags        jsonb not null,
     layout                smallint not null,
     status                rel_projection_status not null,
     backfilled_through_ix bigint,
