@@ -14,13 +14,19 @@ import zio.Console.printLine
 import zio.ZIO.{logInfo, logTrace, serviceWithZIO}
 import com.digitalasset.pqs.postgres.relational.projection.{
   ProjectionApply,
+  ProjectionBackfill,
+  ProjectionBinding,
   ProjectionDefinition,
   ProjectionQuery,
-  ProjectionRegistry
+  ProjectionRegistry,
+  Shape
 }
-import com.digitalasset.transcode.schema.Schema
+import com.digitalasset.transcode.Codec
+import com.digitalasset.transcode.codec.json.JsonCodec
+import com.digitalasset.transcode.schema.{Dictionary, Schema}
+import ujson.Value
 import zio.config.magnolia.{Descriptor, describe}
-import zio.jdbc.{ZConnection, transaction}
+import zio.jdbc.*
 import zio.{ZIO, ZLayer}
 
 object Main extends ComposableApp:
@@ -96,12 +102,24 @@ object Main extends ComposableApp:
 
   private def appProjection =
     "projection" @@ Command("Manage relational typed-column projections")
-      - (appProjectionApply | appProjectionList | appProjectionShow)
+      - (appProjectionApply | appProjectionBackfill | appProjectionActivate | appProjectionList | appProjectionShow)
 
   private def appProjectionApply = (
     "apply" @@ Command("Resolve the configured projection, add typed columns and record a draft version")
       - cliConfig[ConfigProjectionApply]
       `map` projectionApply
+  )
+
+  private def appProjectionBackfill = (
+    "backfill" @@ Command("Populate typed columns of the latest draft projection from stored payloads")
+      - cliConfig[ConfigProjectionBackfill]
+      `map` projectionBackfill
+  )
+
+  private def appProjectionActivate = (
+    "activate" @@ Command("Publish the latest draft projection once it is backfilled through the watermark")
+      - cliConfig[ConfigProjection]
+      `map` projectionActivate
   )
 
   private def appProjectionList = (
@@ -135,6 +153,57 @@ object Main extends ComposableApp:
         config.project(_.ledger) >>> PackageService.live >>> ZLayer.fromZIO(serviceWithZIO[PackageService](_.getSchema))
       )
       .bootstrap(config.project(_.logger).orElse(FileLogging.default) >>> com.digitalasset.pqs.cli.bootstrap)
+
+  private def projectionBackfill(config: ZLayer[Any, Throwable, ConfigProjectionBackfill]) =
+    (for
+      codec <- ZIO.service[Dictionary[Codec[Value]]]
+      message <- transaction(
+        ProjectionRegistry.latestDraft.flatMap {
+          case None => ZIO.succeed("No draft projection to backfill")
+          case Some(version) =>
+            for
+              shapeJson <- ProjectionRegistry.resolvedShapeOf(version)
+              shapes = shapeJson.fold(Map.empty[String, Shape.ResolvedShape])(ProjectionBinding.parse)
+              through <- ProjectionBackfill.run(codec, shapes)
+              _       <- ProjectionRegistry.setBackfilledThrough(version, through)
+            yield s"Backfilled projection version $version through tx_ix $through"
+        }
+      )
+      _ <- printLine(message)
+    yield ())
+      .provide(
+        com.digitalasset.pqs.appversion.LogVersion,
+        (config.project(_.ledger.auth) ++ config.project(_.oauth)) >>> Auth.live(LedgerScope),
+        TokenService.live,
+        config.project(_.ledger) >>> daml.Channel.live,
+        config.project(_.postgres),
+        backend.instanceId,
+        backend.connectionPool,
+        ZLayer.succeed[ContractFilter](ContractFilter(IdentifierFilter.AcceptAll)),
+        ZLayer.succeed(MetadataFilter(IdentifierFilter.AcceptAll)),
+        config.project(_.ledger) >>> PackageService.live >>> DamlSchema.layer,
+        DamlSchema.produce(JsonCodec()).update(_.matchByPackageId)
+      )
+      .bootstrap(config.project(_.logger).orElse(FileLogging.default) >>> com.digitalasset.pqs.cli.bootstrap)
+
+  private def projectionActivate(config: ZLayer[Any, Throwable, ConfigProjection]) =
+    withRegistry(config)(
+      ProjectionRegistry.latestDraft.flatMap {
+        case None => printLine("No draft projection to activate")
+        case Some(version) =>
+          for
+            row       <- ProjectionRegistry.get(version)
+            watermark <- sql"select tx_ix from latest_checkpoint()".query[Long].selectOne.map(_.getOrElse(0L))
+            _ <- row.flatMap(_.backfilledThroughIx) match
+              case Some(through) if through >= watermark =>
+                ProjectionRegistry.activate(version) *> printLine(s"Activated projection version $version")
+              case _ =>
+                printLine(
+                  s"Projection version $version is not backfilled through the current watermark ($watermark); run backfill first"
+                )
+          yield ()
+      }
+    )
 
   private def projectionList(config: ZLayer[Any, Throwable, ConfigProjection]) =
     withRegistry(config)(
@@ -210,6 +279,13 @@ object Main extends ComposableApp:
       oauth: auth.Config.OAuth,
       postgres: backend.PostgresConfig,
       projections: Map[String, ProjectionConfig] = Map.empty,
+      logger: FileLogging.Config
+  )
+
+  private final case class ConfigProjectionBackfill(
+      ledger: daml.Config,
+      oauth: auth.Config.OAuth,
+      postgres: backend.PostgresConfig,
       logger: FileLogging.Config
   )
 

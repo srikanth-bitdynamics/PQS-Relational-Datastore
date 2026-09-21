@@ -302,7 +302,8 @@ begin
     where pkgs.name = package_name and pkgs.version = package_version and pkgs.id = package_id
     into pkg;
     if pkg is null then
-        insert into __rel_package(name, version, id) values (package_name, package_version, package_id);
+        insert into __rel_package(name, version, id) values (package_name, package_version, package_id)
+        on conflict (name, version, id) do nothing;
     end if;
 end;
 $$;
@@ -331,6 +332,9 @@ begin
     if tbl is null then
         raise exception 'relational entity %:%:% (%) is not initialized; run schema apply first',
             package_name, module_name, entity_name, kind;
+    end if;
+    if col in ('contract_pk', 'payload_json', 'view_json', 'metadata') then
+        raise exception 'projection column % collides with a reserved base column of %', col, tbl;
     end if;
     select case data_type
                when 'numeric' then format('numeric(%s, %s)', numeric_precision, numeric_scale)
@@ -937,14 +941,6 @@ ALTER TABLE ONLY pqs_relational.__query_events
 
 
 --
--- Name: __query_projection __query_projection_definition_hash_key; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
---
-
-ALTER TABLE ONLY pqs_relational.__query_projection
-    ADD CONSTRAINT __query_projection_definition_hash_key UNIQUE (definition_hash);
-
-
---
 -- Name: __query_projection __query_projection_pkey; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
 --
 
@@ -1033,6 +1029,14 @@ ALTER TABLE ONLY pqs_relational.__rel_managed_index
 
 
 --
+-- Name: __rel_package __rel_package_name_version_id_key; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__rel_package
+    ADD CONSTRAINT __rel_package_name_version_id_key UNIQUE (name, version, id);
+
+
+--
 -- Name: __rel_package __rel_package_pkey; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
 --
 
@@ -1115,6 +1119,20 @@ CREATE INDEX __query_events_contract_id_idx ON pqs_relational.__query_events USI
 --
 
 CREATE INDEX __query_events_tx_ix_idx ON pqs_relational.__query_events USING btree (tx_ix);
+
+
+--
+-- Name: __query_projection_active_idx; Type: INDEX; Schema: pqs_relational; Owner: -
+--
+
+CREATE UNIQUE INDEX __query_projection_active_idx ON pqs_relational.__query_projection USING btree ((true)) WHERE (status = 'active'::pqs_relational.rel_projection_status);
+
+
+--
+-- Name: __query_projection_live_hash_idx; Type: INDEX; Schema: pqs_relational; Owner: -
+--
+
+CREATE UNIQUE INDEX __query_projection_live_hash_idx ON pqs_relational.__query_projection USING btree (definition_hash) WHERE (status <> 'retired'::pqs_relational.rel_projection_status);
 
 
 --

@@ -36,7 +36,8 @@ create table __rel_package (
     pk      bigserial primary key,
     name    text not null,
     version text not null,
-    id      text not null
+    id      text not null,
+    unique (name, version, id)
 );
 
 create table __rel_entity (
@@ -160,8 +161,7 @@ create table __query_projection (
     status                rel_projection_status not null,
     backfilled_through_ix bigint,
     created_at            timestamptz not null,
-    activated_at          timestamptz,
-    unique (definition_hash)
+    activated_at          timestamptz
 );
 
 create table __rel_managed_index (
@@ -207,6 +207,8 @@ create index __query_event_visibility_party_idx on __query_event_visibility (par
 create index __rel_contract_visibility_party_idx on __rel_contract_visibility (party, contract_pk);
 create index __rel_exercises_contract_idx on __rel_exercises using hash (event_pk);
 create index __rel_tmp_lifecycle_ix_idx on __rel_tmp_lifecycle (archived_tx_ix);
+create unique index __query_projection_live_hash_idx on __query_projection (definition_hash) where status <> 'retired';
+create unique index __query_projection_active_idx on __query_projection ((true)) where status = 'active';
 
 insert into __rel_watermark (singleton) values (true) on conflict do nothing;
 insert into __rel_pruning_metadata (singleton) values (true) on conflict do nothing;

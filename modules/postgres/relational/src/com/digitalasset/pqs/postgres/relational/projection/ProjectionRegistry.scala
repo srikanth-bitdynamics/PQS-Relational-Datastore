@@ -49,8 +49,36 @@ object ProjectionRegistry:
 
   def getByHash(hash: String): ZIO[ZConnection, Throwable, Option[Row]] =
     sql"""select projection_version, status::text, definition_hash, backfilled_through_ix, definition::text
-          from __query_projection where definition_hash = $hash"""
+          from __query_projection where definition_hash = $hash and status <> 'retired'"""
       .query[(Long, String, String, Option[Long], String)]
       .selectOne
       .map(_.map(toRow))
+
+  def latestDraft: ZIO[ZConnection, Throwable, Option[Long]] =
+    sql"select max(projection_version) from __query_projection where status = 'draft'"
+      .query[Option[Long]]
+      .selectOne
+      .map(_.flatten)
+
+  def getActive: ZIO[ZConnection, Throwable, Option[Row]] =
+    sql"""select projection_version, status::text, definition_hash, backfilled_through_ix, definition::text
+          from __query_projection where status = 'active'"""
+      .query[(Long, String, String, Option[Long], String)]
+      .selectOne
+      .map(_.map(toRow))
+
+  def resolvedShapeOf(version: Long): ZIO[ZConnection, Throwable, Option[String]] =
+    sql"select resolved_shape::text from __query_projection where projection_version = $version"
+      .query[String]
+      .selectOne
+
+  def setBackfilledThrough(version: Long, throughIx: Long): ZIO[ZConnection, Throwable, Unit] =
+    sql"update __query_projection set backfilled_through_ix = $throughIx where projection_version = $version".update.unit
+
+  def activate(version: Long): ZIO[ZConnection, Throwable, Unit] =
+    for
+      _ <- sql"update __query_projection set status = 'retired' where status = 'active'".update
+      _ <- sql"""update __query_projection set status = 'active', activated_at = now()
+                 where projection_version = $version""".update
+    yield ()
 end ProjectionRegistry

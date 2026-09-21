@@ -39,7 +39,8 @@ begin
     where pkgs.name = package_name and pkgs.version = package_version and pkgs.id = package_id
     into pkg;
     if pkg is null then
-        insert into __rel_package(name, version, id) values (package_name, package_version, package_id);
+        insert into __rel_package(name, version, id) values (package_name, package_version, package_id)
+        on conflict (name, version, id) do nothing;
     end if;
 end;
 $$ language plpgsql;
@@ -166,6 +167,9 @@ begin
     if tbl is null then
         raise exception 'relational entity %:%:% (%) is not initialized; run schema apply first',
             package_name, module_name, entity_name, kind;
+    end if;
+    if col in ('contract_pk', 'payload_json', 'view_json', 'metadata') then
+        raise exception 'projection column % collides with a reserved base column of %', col, tbl;
     end if;
     select case data_type
                when 'numeric' then format('numeric(%s, %s)', numeric_precision, numeric_scale)
