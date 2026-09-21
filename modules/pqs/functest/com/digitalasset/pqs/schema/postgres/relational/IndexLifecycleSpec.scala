@@ -52,7 +52,7 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
       _ <- sql"create table other_payload (contract_pk bigint primary key, owner text, amount bigint)".execute
       _ <- sql"""insert into __rel_entity (package_name, module_name, entity_name, kind, base_table)
                    values ('Test', 'Asset', 'Asset', 'template', 'payload')""".update
-      v <- ProjectionRegistry.insertDraft(ProjectionDefinition.toJson(definitions), "v1", shape, 1)
+      v <- ProjectionRegistry.insertDraft(ProjectionDefinition.toJson(definitions), "v1", "shape-asset", shape, 1)
       _ <- sql"update __query_projection set status = 'active' where projection_version = $v".update
     yield ()
   }
@@ -173,7 +173,7 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
           v <- transact {
             sql"update __query_projection set status = 'retired'".update *>
               ProjectionRegistry
-                .insertDraft(ProjectionDefinition.toJson(definitions), "v2", shape, 1)
+                .insertDraft(ProjectionDefinition.toJson(definitions), "v2", "shape-asset", shape, 1)
                 .tap(v => sql"update __query_projection set status = 'active' where projection_version = $v".update)
           }
           _ <- IndexManager.build *> IndexManager.adopt

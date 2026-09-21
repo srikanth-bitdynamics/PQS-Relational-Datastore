@@ -12,7 +12,8 @@ import zio.jdbc.*
 object IndexManager:
   import IndexPlanner.OrderKey
 
-  val contractsColumns: Set[String] = Set("created_tx_ix", "created_at_offset", "contract_pk")
+  val systemColumns: Set[String]    = Set("created_tx_ix", "archived_tx_ix")
+  val contractsColumns: Set[String] = Set("created_at_offset", "contract_pk")
   private val includeColumn         = "contract_pk"
 
   final case class CoveredShape(
@@ -96,7 +97,8 @@ object IndexManager:
       promoted: Set[String],
       queries: Seq[ProjectionQuery]
   ): (Seq[PlannedIndex], Seq[String], Seq[String]) =
-    val classifieds = queries.map(classify(_, promoted))
+    val local       = promoted ++ systemColumns
+    val classifieds = queries.map(classify(_, local))
     val diagnostics = classifieds.filter(_.unknown.nonEmpty).map { c =>
       s"projection '$name' on $qualified: query ${shapeText(c)} references non-promoted column(s): " +
         c.unknown.distinct.sorted.mkString(", ") + "; skipped"
@@ -108,7 +110,7 @@ object IndexManager:
         "served by __rel_contracts lifecycle indexes"
     )
     val payloadReqs = indexable.map(c => ProjectionQuery(c.payloadFilter, c.payloadOrder.map(tokenOf)))
-    val specs       = IndexPlanner.plan(payloadReqs, promoted).indexes
+    val specs       = IndexPlanner.plan(payloadReqs, local).indexes
     val attributed  = indexable.map(c => (c, specs.filter(covers(_, c)).maxByOption(_.columns.length)))
     val indexes = specs.flatMap { spec =>
       attributed.collect { case (c, Some(s)) if s === spec => c } match
@@ -119,12 +121,12 @@ object IndexManager:
     }
     (indexes, diagnostics, notes)
 
-  private def classify(query: ProjectionQuery, promoted: Set[String]): Classified =
+  private def classify(query: ProjectionQuery, local: Set[String]): Classified =
     val parsed         = query.order.map(IndexPlanner.parseOrder)
-    val payloadFilter  = query.filter.filter(promoted.contains)
+    val payloadFilter  = query.filter.filter(local.contains)
     val externalFilter = query.filter.filter(contractsColumns.contains)
-    val unknownFilter  = query.filter.filterNot(c => promoted.contains(c) || contractsColumns.contains(c))
-    val payloadOrder   = parsed.takeWhile(k => promoted.contains(k.column))
+    val unknownFilter  = query.filter.filterNot(c => local.contains(c) || contractsColumns.contains(c))
+    val payloadOrder   = parsed.takeWhile(k => local.contains(k.column))
     val rest           = parsed.drop(payloadOrder.length)
     val residualOrder  = rest.filter(k => contractsColumns.contains(k.column))
     val unknownOrder   = rest.filterNot(k => contractsColumns.contains(k.column)).map(_.column)
@@ -232,7 +234,7 @@ object IndexManager:
         case None => ZIO.succeed("No active projection; nothing to adopt")
         case Some((version, p)) =>
           ZIO.foreach(p.indexes)(validateOne).flatMap { outcomes =>
-            val complete = p.indexes.nonEmpty && outcomes.forall {
+            val complete = outcomes.forall {
               case Validation.Valid(_) => true
               case _                   => false
             }
@@ -407,8 +409,8 @@ object IndexManager:
       }
 
   private def supersede(names: Seq[String]): ZIO[ZConnection, Throwable, Long] =
-    (sql"""update __rel_managed_index set status = 'retiring'::rel_index_status
-           where status in ('active'::rel_index_status, 'valid'::rel_index_status)
+    (sql"""update __rel_managed_index set status = 'retiring'::rel_index_status, adopted = false
+           where status in ('active'::rel_index_status, 'valid'::rel_index_status, 'building'::rel_index_status)
              and index_name <> all(""" ++ textArray(names) ++ sql")").update
 
   private def listRows: ZIO[ZConnection, Throwable, Seq[(Long, String, String, String, Boolean)]] =
