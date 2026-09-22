@@ -96,9 +96,10 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
           _ <- setup *> ddl("create index abandoned_build on payload (owner)")
           _ <- transact(
             sql"""insert into __rel_managed_index
-                    (projection_version, table_name, index_name, definition, columns, status, adopted, created_at)
-                  values (1, 'payload', 'abandoned_build', 'abandoned', array['owner'],
-                          'building'::rel_index_status, false, now())""".update
+                    (projection_version, table_name, index_name, definition, columns, key_directions,
+                     included_columns, status, adopted, created_at)
+                  values (1, 'payload', 'abandoned_build', 'abandoned', array['owner'], array['0'],
+                          array[]::text[], 'building'::rel_index_status, false, now())""".update
           )
           _        <- IndexManager.build *> IndexManager.adopt
           stranded <- status("abandoned_build")
@@ -120,13 +121,36 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
           _ <- setup *> ddl("create index foreign_build on payload (amount)")
           _ <- transact(
             sql"""insert into __rel_managed_index
-                    (projection_version, table_name, index_name, definition, columns, status, adopted, created_at)
-                  values (1, 'payload', 'foreign_build', 'foreign', array['owner'],
-                          'retiring'::rel_index_status, false, now())""".update
+                    (projection_version, table_name, index_name, definition, columns, key_directions,
+                     included_columns, status, adopted, created_at)
+                  values (1, 'payload', 'foreign_build', 'foreign', array['owner'], array['0'],
+                          array[]::text[], 'retiring'::rel_index_status, false, now())""".update
           )
           report <- IndexManager.retire
           after  <- status("foreign_build")
           exists <- transact(sql"select to_regclass('foreign_build') is not null".query[Boolean].selectOne)
+        yield assertTrue(
+          report.contains("does not match its registered definition"),
+          after.contains("retiring"),
+          exists.contains(true)
+        )
+    },
+    funcTest("an unrecorded index whose key direction differs from the registry is not dropped") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup *> ddl("create index direction_build on payload (owner, amount)")
+          _ <- transact(
+            sql"""insert into __rel_managed_index
+                    (projection_version, table_name, index_name, definition, columns, key_directions,
+                     included_columns, status, adopted, created_at)
+                  values (1, 'payload', 'direction_build', 'direction', array['owner', 'amount'],
+                          array['0', '3'], array[]::text[], 'retiring'::rel_index_status, false, now())""".update
+          )
+          report <- IndexManager.retire
+          after  <- status("direction_build")
+          exists <- transact(sql"select to_regclass('direction_build') is not null".query[Boolean].selectOne)
         yield assertTrue(
           report.contains("does not match its registered definition"),
           after.contains("retiring"),

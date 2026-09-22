@@ -357,32 +357,49 @@ object IndexManager:
           where m.index_name = ${idx.name} and m.table_name = ${idx.table} and m.definition = ${idx.definition}
             and m.status <> 'retired'::rel_index_status""").update
     ensureManaged *> refresh *> (sql"""insert into __rel_managed_index
-             (projection_version, table_name, index_name, definition, columns, opclasses,
+             (projection_version, table_name, index_name, definition, columns, key_directions, included_columns,
               status, adopted, covered_query_shapes, created_at)
            select $version, ${idx.table}, ${idx.name}, ${idx.definition}, """ ++ textArray(idx.columns) ++
-      sql", null, 'building'::rel_index_status, false, " ++ shapes ++ sql""", now()
+      sql", " ++ textArray(directionsOf(idx)) ++ sql", " ++ textArray(idx.include) ++
+      sql", 'building'::rel_index_status, false, " ++ shapes ++ sql""", now()
            where not exists (
              select 1 from __rel_managed_index m
              where m.index_name = ${idx.name} and m.status <> 'retired'::rel_index_status)""").update.unit
 
-  private def validateOne(idx: PlannedIndex): ZIO[ZConnection, Throwable, Validation] =
-    val directions = idx.keys.map(k => if k.ascending then "0" else "3")
-    (sql"""select i.indisvalid and i.indisready,
-            t.relnamespace = c.relnamespace and t.relname = ${idx.table}
-            and am.amname = 'btree' and not i.indisunique and not i.indisprimary and not i.indisexclusion
+  private def directionsOf(idx: PlannedIndex): Seq[String] =
+    idx.keys.map(k => if k.ascending then "0" else "3")
+
+  private def structurallyMatches(
+      keyCount: SqlFragment,
+      totalCount: SqlFragment,
+      columns: SqlFragment,
+      directions: SqlFragment
+  ): SqlFragment =
+    sql"""am.amname = 'btree' and not i.indisunique and not i.indisprimary and not i.indisexclusion
             and i.indpred is null and i.indexprs is null
-            and i.indnkeyatts = ${idx.keys.size} and i.indnatts = ${idx.keys.size + idx.include.size}
-            and array(select a.attname::text from unnest(i.indkey) with ordinality k(attnum, pos)
+            and i.indnkeyatts = """ ++ keyCount ++ sql" and i.indnatts = " ++ totalCount ++
+      sql""" and array(select a.attname::text from unnest(i.indkey) with ordinality k(attnum, pos)
                       join pg_attribute a on a.attrelid = t.oid and a.attnum = k.attnum
-                      order by k.pos) = """ ++ textArray(idx.columns ++ idx.include) ++
-      sql""" and array(select opt::text from unnest(i.indoption) opt) = """ ++ textArray(directions) ++
+                      order by k.pos) = """ ++ columns ++
+      sql""" and array(select opt::text from unnest(i.indoption) opt) = """ ++ directions ++
       sql""" and not exists (
               select 1 from unnest(i.indkey) with ordinality k(attnum, pos)
               join pg_attribute a on a.attrelid = t.oid and a.attnum = k.attnum
               join pg_opclass opc on opc.oid = i.indclass[k.pos::int - 1]
               where k.pos <= i.indnkeyatts
                 and (not opc.opcdefault or i.indcollation[k.pos::int - 1] <> a.attcollation)
-            ) and exists (
+            )"""
+
+  private def validateOne(idx: PlannedIndex): ZIO[ZConnection, Throwable, Validation] =
+    (sql"""select i.indisvalid and i.indisready,
+            t.relnamespace = c.relnamespace and t.relname = ${idx.table}
+            and """ ++ structurallyMatches(
+      sql"${idx.keys.size}",
+      sql"${idx.keys.size + idx.include.size}",
+      textArray(idx.columns ++ idx.include),
+      textArray(directionsOf(idx))
+    ) ++
+      sql""" and exists (
               select 1 from __rel_managed_index m where m.index_name = ${idx.name}
                 and m.table_name = ${idx.table} and m.definition = ${idx.definition}
             and m.status in ('building'::rel_index_status, 'valid'::rel_index_status, 'active'::rel_index_status)
@@ -469,19 +486,21 @@ object IndexManager:
       table: String,
       expectedOid: Option[Long]
   ): ZIO[ZConnection, Throwable, Unit] =
-    sql"""select c.oid::bigint, coalesce(t.relname, '')::text, coalesce(t.relnamespace = c.relnamespace, false),
-            coalesce(am.amname = 'btree' and not i.indisunique and not i.indisprimary and not i.indisexclusion
-                     and i.indpred is null and i.indexprs is null
-                     and array(select a.attname::text from unnest(i.indkey) with ordinality k(attnum, pos)
-                               join pg_attribute a on a.attrelid = t.oid and a.attnum = k.attnum
-                               where k.pos <= i.indnkeyatts order by k.pos)
-                         = (select m.columns from __rel_managed_index m
-                            where m.index_name = $name and m.table_name = $table
-                              and m.status = 'retiring'::rel_index_status), false)
+    val recorded = (column: String) => sql"""(select m.""" ++ SqlFragment(column) ++ sql""" from __rel_managed_index m
+             where m.index_name = $name and m.table_name = $table
+               and m.status = 'retiring'::rel_index_status)"""
+    (sql"""select c.oid::bigint, coalesce(t.relname, '')::text, coalesce(t.relnamespace = c.relnamespace, false),
+            coalesce(""" ++ structurallyMatches(
+      sql"cardinality(" ++ recorded("columns") ++ sql")",
+      sql"cardinality(" ++ recorded("columns") ++ sql") + cardinality(" ++ recorded("included_columns") ++ sql")",
+      recorded("columns") ++ sql" || " ++ recorded("included_columns"),
+      recorded("key_directions")
+    ) ++
+      sql""", false)
           from pg_class c join pg_namespace n on n.oid = c.relnamespace
           left join pg_index i on i.indexrelid = c.oid left join pg_class t on t.oid = i.indrelid
           left join pg_am am on am.oid = c.relam
-          where n.nspname = $schema and c.relname = $name"""
+          where n.nspname = $schema and c.relname = $name""")
       .query[(Long, String, Boolean, Boolean)]
       .selectOne
       .flatMap {
