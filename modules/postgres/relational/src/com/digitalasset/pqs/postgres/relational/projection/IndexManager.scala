@@ -469,25 +469,40 @@ object IndexManager:
       table: String,
       expectedOid: Option[Long]
   ): ZIO[ZConnection, Throwable, Unit] =
-    sql"""select c.oid::bigint, coalesce(t.relname, '')::text, coalesce(t.relnamespace = c.relnamespace, false)
+    sql"""select c.oid::bigint, coalesce(t.relname, '')::text, coalesce(t.relnamespace = c.relnamespace, false),
+            coalesce(am.amname = 'btree' and not i.indisunique and not i.indisprimary and not i.indisexclusion
+                     and i.indpred is null and i.indexprs is null
+                     and array(select a.attname::text from unnest(i.indkey) with ordinality k(attnum, pos)
+                               join pg_attribute a on a.attrelid = t.oid and a.attnum = k.attnum
+                               where k.pos <= i.indnkeyatts order by k.pos)
+                         = (select m.columns from __rel_managed_index m
+                            where m.index_name = $name and m.table_name = $table
+                              and m.status = 'retiring'::rel_index_status), false)
           from pg_class c join pg_namespace n on n.oid = c.relnamespace
           left join pg_index i on i.indexrelid = c.oid left join pg_class t on t.oid = i.indrelid
+          left join pg_am am on am.oid = c.relam
           where n.nspname = $schema and c.relname = $name"""
-      .query[(Long, String, Boolean)]
+      .query[(Long, String, Boolean, Boolean)]
       .selectOne
       .flatMap {
         case None => ZIO.unit
-        case Some((oid, actualTable, sameSchema)) if (actualTable === table) && sameSchema =>
+        case Some((oid, actualTable, sameSchema, registered)) if (actualTable === table) && sameSchema =>
           expectedOid match
             case Some(recorded) if recorded === oid => ZIO.unit
             case Some(_) =>
               ZIO.fail(
                 new RuntimeException(s"Refusing to drop $schema.$name: physical index ownership changed")
               )
-            case None =>
+            case None if registered =>
               sql"""update __rel_managed_index set physical_oid = ${oid}::oid
                     where index_name = $name and table_name = $table
                       and status = 'retiring'::rel_index_status and physical_oid is null""".update.unit
+            case None =>
+              ZIO.fail(
+                new RuntimeException(
+                  s"Refusing to drop $schema.$name: unrecorded index does not match its registered definition"
+                )
+              )
         case _ =>
           ZIO.fail(
             new RuntimeException(s"Refusing to drop $schema.$name: physical index ownership is unverified or changed")

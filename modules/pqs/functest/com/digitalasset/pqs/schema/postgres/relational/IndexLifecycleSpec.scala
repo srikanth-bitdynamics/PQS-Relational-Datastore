@@ -112,6 +112,27 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
           exists.contains(false)
         )
     },
+    funcTest("an unrecorded index whose shape differs from the registry is not dropped") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup *> ddl("create index foreign_build on payload (amount)")
+          _ <- transact(
+            sql"""insert into __rel_managed_index
+                    (projection_version, table_name, index_name, definition, columns, status, adopted, created_at)
+                  values (1, 'payload', 'foreign_build', 'foreign', array['owner'],
+                          'retiring'::rel_index_status, false, now())""".update
+          )
+          report <- IndexManager.retire
+          after  <- status("foreign_build")
+          exists <- transact(sql"select to_regclass('foreign_build') is not null".query[Boolean].selectOne)
+        yield assertTrue(
+          report.contains("does not match its registered definition"),
+          after.contains("retiring"),
+          exists.contains(true)
+        )
+    },
     funcTest("an unmanaged same-name index is neither adopted nor deleted") {
       Given:
         Postgres.database >+> ProductionPool.layer()
