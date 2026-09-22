@@ -52,7 +52,7 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
       _ <- sql"create table other_payload (contract_pk bigint primary key, owner text, amount bigint)".execute
       _ <- sql"""insert into __rel_entity (package_name, module_name, entity_name, kind, base_table)
                    values ('Test', 'Asset', 'Asset', 'template', 'payload')""".update
-      v <- ProjectionRegistry.insertDraft(ProjectionDefinition.toJson(definitions), "v1", shape, 1)
+      v <- ProjectionRegistry.insertDraft(ProjectionDefinition.toJson(definitions), "v1", "shape-asset", shape, 1)
       _ <- sql"update __query_projection set status = 'active' where projection_version = $v".update
     yield ()
   }
@@ -86,6 +86,75 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
           after.contains("retiring"),
           active.contains("active"),
           retired.contains("retired")
+        )
+    },
+    funcTest("an abandoned building index with no recorded identity is recovered and dropped") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup *> ddl("create index abandoned_build on payload (owner)")
+          _ <- transact(
+            sql"""insert into __rel_managed_index
+                    (projection_version, table_name, index_name, definition, columns, key_directions,
+                     included_columns, status, adopted, created_at)
+                  values (1, 'payload', 'abandoned_build', 'abandoned', array['owner'], array['0'],
+                          array[]::text[], 'building'::rel_index_status, false, now())""".update
+          )
+          _        <- IndexManager.build *> IndexManager.adopt
+          stranded <- status("abandoned_build")
+          report   <- IndexManager.retire
+          after    <- status("abandoned_build")
+          exists   <- transact(sql"select to_regclass('abandoned_build') is not null".query[Boolean].selectOne)
+        yield assertTrue(
+          stranded.contains("retiring"),
+          report.contains("Retired 1"),
+          after.contains("retired"),
+          exists.contains(false)
+        )
+    },
+    funcTest("an unrecorded index whose shape differs from the registry is not dropped") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup *> ddl("create index foreign_build on payload (amount)")
+          _ <- transact(
+            sql"""insert into __rel_managed_index
+                    (projection_version, table_name, index_name, definition, columns, key_directions,
+                     included_columns, status, adopted, created_at)
+                  values (1, 'payload', 'foreign_build', 'foreign', array['owner'], array['0'],
+                          array[]::text[], 'retiring'::rel_index_status, false, now())""".update
+          )
+          report <- IndexManager.retire
+          after  <- status("foreign_build")
+          exists <- transact(sql"select to_regclass('foreign_build') is not null".query[Boolean].selectOne)
+        yield assertTrue(
+          report.contains("does not match its registered definition"),
+          after.contains("retiring"),
+          exists.contains(true)
+        )
+    },
+    funcTest("an unrecorded index whose key direction differs from the registry is not dropped") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup *> ddl("create index direction_build on payload (owner, amount)")
+          _ <- transact(
+            sql"""insert into __rel_managed_index
+                    (projection_version, table_name, index_name, definition, columns, key_directions,
+                     included_columns, status, adopted, created_at)
+                  values (1, 'payload', 'direction_build', 'direction', array['owner', 'amount'],
+                          array['0', '3'], array[]::text[], 'retiring'::rel_index_status, false, now())""".update
+          )
+          report <- IndexManager.retire
+          after  <- status("direction_build")
+          exists <- transact(sql"select to_regclass('direction_build') is not null".query[Boolean].selectOne)
+        yield assertTrue(
+          report.contains("does not match its registered definition"),
+          after.contains("retiring"),
+          exists.contains(true)
         )
     },
     funcTest("an unmanaged same-name index is neither adopted nor deleted") {
@@ -173,7 +242,7 @@ object IndexLifecycleSpec extends FuncTest[Postgres]:
           v <- transact {
             sql"update __query_projection set status = 'retired'".update *>
               ProjectionRegistry
-                .insertDraft(ProjectionDefinition.toJson(definitions), "v2", shape, 1)
+                .insertDraft(ProjectionDefinition.toJson(definitions), "v2", "shape-asset", shape, 1)
                 .tap(v => sql"update __query_projection set status = 'active' where projection_version = $v".update)
           }
           _ <- IndexManager.build *> IndexManager.adopt

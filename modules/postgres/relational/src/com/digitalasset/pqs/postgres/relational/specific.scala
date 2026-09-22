@@ -177,12 +177,13 @@ object specific:
 
   final case class ContractPayload(
       contractPk: IdPlaceholder,
+      createdAtIx: Long,
       payloadJson: Value,
       promoted: Seq[(String, TypedRowCodec.SqlValue)] = Seq.empty
   ):
-    val columns = Seq("contract_pk", "payload_json") ++ promoted.map(kv => quoteIdent(kv._1))
+    val columns = Seq("contract_pk", "created_tx_ix", "payload_json") ++ promoted.map(kv => quoteIdent(kv._1))
     val rowValues =
-      promoted.foldLeft(model.values(contractPk)(payloadJson))((row, cell) => row(cell._2))
+      promoted.foldLeft(model.values(contractPk)(createdAtIx)(payloadJson))((row, cell) => row(cell._2))
 
   final case class InterfaceView(contractPk: IdPlaceholder, viewJson: Value):
     val columns   = Seq("contract_pk", "view_json")

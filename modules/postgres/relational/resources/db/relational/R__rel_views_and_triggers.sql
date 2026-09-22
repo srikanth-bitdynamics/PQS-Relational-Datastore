@@ -23,6 +23,8 @@ $$ language plpgsql;
 
 create or replace function __rel_update_watermark_fn() returns trigger as
 $$
+declare
+    tbl text;
 begin
     -- Bypass the writer check when instance_id is being updated explicitly, so a writer reset can invalidate its predecessor.
     if new.instance_id = old.instance_id then
@@ -43,6 +45,23 @@ begin
     ) d
     where c.contract_id = d.contract_id and c.created_tx_ix <= new.tx_ix
       and (c.archived_tx_ix is null or d.archived_tx_ix < c.archived_tx_ix);
+
+    for tbl in
+        select distinct e.base_table
+        from __rel_tmp_lifecycle d
+        join __rel_contracts c on c.contract_id = d.contract_id
+        join __rel_entity e on e.pk = c.template_entity_pk
+        where d.archived_tx_ix <= new.tx_ix and c.created_tx_ix <= new.tx_ix and e.base_table is not null
+    loop
+        execute format(
+            'update %I p set archived_tx_ix = c.archived_tx_ix
+             from __rel_contracts c
+             join __rel_tmp_lifecycle d on d.contract_id = c.contract_id
+             where p.contract_pk = c.contract_pk and d.archived_tx_ix <= $1 and c.created_tx_ix <= $1
+               and p.archived_tx_ix is distinct from c.archived_tx_ix',
+            tbl
+        ) using new.tx_ix;
+    end loop;
 
     delete from __rel_tmp_lifecycle d
     using __rel_contracts c
@@ -80,7 +99,7 @@ select t.tx_ix,
        t.external_transaction_hash,
        t.paid_traffic_cost
 from __rel_transactions t
-where t.ledger_offset between oldest_offset() and latest_offset();
+where t.ledger_offset between (select oldest_offset()) and (select latest_offset());
 
 create or replace view active_contracts as
 select c.contract_pk,
@@ -93,7 +112,7 @@ select c.contract_pk,
        c.observers,
        c.creation_synchronizer_id
 from __rel_contracts c
-where c.life_ix @> latest_ix()
+where c.life_ix @> (select latest_ix())
   and not c.divulged_only
   and c.redaction_id is null;
 
@@ -102,4 +121,4 @@ select e.ledger_offset, e.node_id, e.tx_ix, e.contract_id, e.event_kind,
        r.reassignment_id, r.source_synchronizer_id, r.target_synchronizer_id,
        r.submitter, r.reassignment_counter, r.assignment_exclusivity
 from __query_events e join __rel_reassignments r using (event_pk)
-where e.ledger_offset between oldest_offset() and latest_offset();
+where e.ledger_offset between (select oldest_offset()) and (select latest_offset());

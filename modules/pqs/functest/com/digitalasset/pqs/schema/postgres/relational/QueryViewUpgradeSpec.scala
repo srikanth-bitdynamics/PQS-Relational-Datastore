@@ -83,9 +83,9 @@ object QueryViewUpgradeSpec extends FuncTest[Postgres]:
           _ <- setup
           draft <- transact {
             for
-              old  <- ProjectionRegistry.insertDraft(ujson.Obj(), "old", ujson.Obj(), 1)
+              old  <- ProjectionRegistry.insertDraft(ujson.Obj(), "old", "shape-empty", ujson.Obj(), 1)
               _    <- sql"update __query_projection set status = 'active' where projection_version = $old".update
-              next <- ProjectionRegistry.insertDraft(ujson.Obj(), "next", ujson.Obj(), 1)
+              next <- ProjectionRegistry.insertDraft(ujson.Obj(), "next", "shape-empty", ujson.Obj(), 1)
               _    <- ProjectionRegistry.setBackfilledThrough(next, 0L)
             yield next
           }

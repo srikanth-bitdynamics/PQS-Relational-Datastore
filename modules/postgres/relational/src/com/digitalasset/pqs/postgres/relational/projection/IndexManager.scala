@@ -12,7 +12,8 @@ import zio.jdbc.*
 object IndexManager:
   import IndexPlanner.OrderKey
 
-  val contractsColumns: Set[String] = Set("created_tx_ix", "created_at_offset", "contract_pk")
+  val systemColumns: Set[String]    = Set("created_tx_ix", "archived_tx_ix")
+  val contractsColumns: Set[String] = Set("created_at_offset", "contract_pk")
   private val includeColumn         = "contract_pk"
 
   final case class CoveredShape(
@@ -96,7 +97,8 @@ object IndexManager:
       promoted: Set[String],
       queries: Seq[ProjectionQuery]
   ): (Seq[PlannedIndex], Seq[String], Seq[String]) =
-    val classifieds = queries.map(classify(_, promoted))
+    val local       = promoted ++ systemColumns
+    val classifieds = queries.map(classify(_, local))
     val diagnostics = classifieds.filter(_.unknown.nonEmpty).map { c =>
       s"projection '$name' on $qualified: query ${shapeText(c)} references non-promoted column(s): " +
         c.unknown.distinct.sorted.mkString(", ") + "; skipped"
@@ -108,7 +110,7 @@ object IndexManager:
         "served by __rel_contracts lifecycle indexes"
     )
     val payloadReqs = indexable.map(c => ProjectionQuery(c.payloadFilter, c.payloadOrder.map(tokenOf)))
-    val specs       = IndexPlanner.plan(payloadReqs, promoted).indexes
+    val specs       = IndexPlanner.plan(payloadReqs, local).indexes
     val attributed  = indexable.map(c => (c, specs.filter(covers(_, c)).maxByOption(_.columns.length)))
     val indexes = specs.flatMap { spec =>
       attributed.collect { case (c, Some(s)) if s === spec => c } match
@@ -119,12 +121,12 @@ object IndexManager:
     }
     (indexes, diagnostics, notes)
 
-  private def classify(query: ProjectionQuery, promoted: Set[String]): Classified =
+  private def classify(query: ProjectionQuery, local: Set[String]): Classified =
     val parsed         = query.order.map(IndexPlanner.parseOrder)
-    val payloadFilter  = query.filter.filter(promoted.contains)
+    val payloadFilter  = query.filter.filter(local.contains)
     val externalFilter = query.filter.filter(contractsColumns.contains)
-    val unknownFilter  = query.filter.filterNot(c => promoted.contains(c) || contractsColumns.contains(c))
-    val payloadOrder   = parsed.takeWhile(k => promoted.contains(k.column))
+    val unknownFilter  = query.filter.filterNot(c => local.contains(c) || contractsColumns.contains(c))
+    val payloadOrder   = parsed.takeWhile(k => local.contains(k.column))
     val rest           = parsed.drop(payloadOrder.length)
     val residualOrder  = rest.filter(k => contractsColumns.contains(k.column))
     val unknownOrder   = rest.filterNot(k => contractsColumns.contains(k.column)).map(_.column)
@@ -232,7 +234,7 @@ object IndexManager:
         case None => ZIO.succeed("No active projection; nothing to adopt")
         case Some((version, p)) =>
           ZIO.foreach(p.indexes)(validateOne).flatMap { outcomes =>
-            val complete = p.indexes.nonEmpty && outcomes.forall {
+            val complete = outcomes.forall {
               case Validation.Valid(_) => true
               case _                   => false
             }
@@ -259,10 +261,11 @@ object IndexManager:
         active <- planActive
         planned = active.toList.flatMap(_._2.indexes.map(_.name)).toSet
         candidates <-
-          sql"select index_name, table_name, physical_oid::bigint from __rel_managed_index where status = 'retiring'::rel_index_status"
-            .query[(String, String, Option[Long])]
+          sql"""select index_name, table_name, physical_oid is null, coalesce(physical_oid::bigint, 0)
+                from __rel_managed_index where status = 'retiring'::rel_index_status"""
+            .query[(String, String, Boolean, Long)]
             .selectAll
-            .map(_.toSeq)
+            .map(_.map((name, table, unknown, oid) => (name, table, if unknown then None else Some(oid))).toSeq)
         results <- ZIO.foreach(candidates.filterNot(c => planned.contains(c._1))) { (name, table, oid) =>
           (verifyOwnership(schema, name, table, oid) *> runConcurrently(dropDdl(schema, name))).either.map(name -> _)
         }
@@ -354,32 +357,49 @@ object IndexManager:
           where m.index_name = ${idx.name} and m.table_name = ${idx.table} and m.definition = ${idx.definition}
             and m.status <> 'retired'::rel_index_status""").update
     ensureManaged *> refresh *> (sql"""insert into __rel_managed_index
-             (projection_version, table_name, index_name, definition, columns, opclasses,
+             (projection_version, table_name, index_name, definition, columns, key_directions, included_columns,
               status, adopted, covered_query_shapes, created_at)
            select $version, ${idx.table}, ${idx.name}, ${idx.definition}, """ ++ textArray(idx.columns) ++
-      sql", null, 'building'::rel_index_status, false, " ++ shapes ++ sql""", now()
+      sql", " ++ textArray(directionsOf(idx)) ++ sql", " ++ textArray(idx.include) ++
+      sql", 'building'::rel_index_status, false, " ++ shapes ++ sql""", now()
            where not exists (
              select 1 from __rel_managed_index m
              where m.index_name = ${idx.name} and m.status <> 'retired'::rel_index_status)""").update.unit
 
-  private def validateOne(idx: PlannedIndex): ZIO[ZConnection, Throwable, Validation] =
-    val directions = idx.keys.map(k => if k.ascending then "0" else "3")
-    (sql"""select i.indisvalid and i.indisready,
-            t.relnamespace = c.relnamespace and t.relname = ${idx.table}
-            and am.amname = 'btree' and not i.indisunique and not i.indisprimary and not i.indisexclusion
+  private def directionsOf(idx: PlannedIndex): Seq[String] =
+    idx.keys.map(k => if k.ascending then "0" else "3")
+
+  private def structurallyMatches(
+      keyCount: SqlFragment,
+      totalCount: SqlFragment,
+      columns: SqlFragment,
+      directions: SqlFragment
+  ): SqlFragment =
+    sql"""am.amname = 'btree' and not i.indisunique and not i.indisprimary and not i.indisexclusion
             and i.indpred is null and i.indexprs is null
-            and i.indnkeyatts = ${idx.keys.size} and i.indnatts = ${idx.keys.size + idx.include.size}
-            and array(select a.attname::text from unnest(i.indkey) with ordinality k(attnum, pos)
+            and i.indnkeyatts = """ ++ keyCount ++ sql" and i.indnatts = " ++ totalCount ++
+      sql""" and array(select a.attname::text from unnest(i.indkey) with ordinality k(attnum, pos)
                       join pg_attribute a on a.attrelid = t.oid and a.attnum = k.attnum
-                      order by k.pos) = """ ++ textArray(idx.columns ++ idx.include) ++
-      sql""" and array(select opt::text from unnest(i.indoption) opt) = """ ++ textArray(directions) ++
+                      order by k.pos) = """ ++ columns ++
+      sql""" and array(select opt::text from unnest(i.indoption) opt) = """ ++ directions ++
       sql""" and not exists (
               select 1 from unnest(i.indkey) with ordinality k(attnum, pos)
               join pg_attribute a on a.attrelid = t.oid and a.attnum = k.attnum
               join pg_opclass opc on opc.oid = i.indclass[k.pos::int - 1]
               where k.pos <= i.indnkeyatts
                 and (not opc.opcdefault or i.indcollation[k.pos::int - 1] <> a.attcollation)
-            ) and exists (
+            )"""
+
+  private def validateOne(idx: PlannedIndex): ZIO[ZConnection, Throwable, Validation] =
+    (sql"""select i.indisvalid and i.indisready,
+            t.relnamespace = c.relnamespace and t.relname = ${idx.table}
+            and """ ++ structurallyMatches(
+      sql"${idx.keys.size}",
+      sql"${idx.keys.size + idx.include.size}",
+      textArray(idx.columns ++ idx.include),
+      textArray(directionsOf(idx))
+    ) ++
+      sql""" and exists (
               select 1 from __rel_managed_index m where m.index_name = ${idx.name}
                 and m.table_name = ${idx.table} and m.definition = ${idx.definition}
             and m.status in ('building'::rel_index_status, 'valid'::rel_index_status, 'active'::rel_index_status)
@@ -407,8 +427,8 @@ object IndexManager:
       }
 
   private def supersede(names: Seq[String]): ZIO[ZConnection, Throwable, Long] =
-    (sql"""update __rel_managed_index set status = 'retiring'::rel_index_status
-           where status in ('active'::rel_index_status, 'valid'::rel_index_status)
+    (sql"""update __rel_managed_index set status = 'retiring'::rel_index_status, adopted = false
+           where status in ('active'::rel_index_status, 'valid'::rel_index_status, 'building'::rel_index_status)
              and index_name <> all(""" ++ textArray(names) ++ sql")").update
 
   private def listRows: ZIO[ZConnection, Throwable, Seq[(Long, String, String, String, Boolean)]] =
@@ -466,17 +486,42 @@ object IndexManager:
       table: String,
       expectedOid: Option[Long]
   ): ZIO[ZConnection, Throwable, Unit] =
-    sql"""select c.oid::bigint, coalesce(t.relname, '')::text, coalesce(t.relnamespace = c.relnamespace, false)
+    val recorded = (column: String) => sql"""(select m.""" ++ SqlFragment(column) ++ sql""" from __rel_managed_index m
+             where m.index_name = $name and m.table_name = $table
+               and m.status = 'retiring'::rel_index_status)"""
+    (sql"""select c.oid::bigint, coalesce(t.relname, '')::text, coalesce(t.relnamespace = c.relnamespace, false),
+            coalesce(""" ++ structurallyMatches(
+      sql"cardinality(" ++ recorded("columns") ++ sql")",
+      sql"cardinality(" ++ recorded("columns") ++ sql") + cardinality(" ++ recorded("included_columns") ++ sql")",
+      recorded("columns") ++ sql" || " ++ recorded("included_columns"),
+      recorded("key_directions")
+    ) ++
+      sql""", false)
           from pg_class c join pg_namespace n on n.oid = c.relnamespace
           left join pg_index i on i.indexrelid = c.oid left join pg_class t on t.oid = i.indrelid
-          where n.nspname = $schema and c.relname = $name"""
-      .query[(Long, String, Boolean)]
+          left join pg_am am on am.oid = c.relam
+          where n.nspname = $schema and c.relname = $name""")
+      .query[(Long, String, Boolean, Boolean)]
       .selectOne
       .flatMap {
         case None => ZIO.unit
-        case Some((oid, actualTable, sameSchema))
-            if expectedOid.contains(oid) && (actualTable === table) && sameSchema =>
-          ZIO.unit
+        case Some((oid, actualTable, sameSchema, registered)) if (actualTable === table) && sameSchema =>
+          expectedOid match
+            case Some(recorded) if recorded === oid => ZIO.unit
+            case Some(_) =>
+              ZIO.fail(
+                new RuntimeException(s"Refusing to drop $schema.$name: physical index ownership changed")
+              )
+            case None if registered =>
+              sql"""update __rel_managed_index set physical_oid = ${oid}::oid
+                    where index_name = $name and table_name = $table
+                      and status = 'retiring'::rel_index_status and physical_oid is null""".update.unit
+            case None =>
+              ZIO.fail(
+                new RuntimeException(
+                  s"Refusing to drop $schema.$name: unrecorded index does not match its registered definition"
+                )
+              )
         case _ =>
           ZIO.fail(
             new RuntimeException(s"Refusing to drop $schema.$name: physical index ownership is unverified or changed")

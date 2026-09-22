@@ -53,15 +53,19 @@ object QueryViews:
     else
       val ordered = existing ++ columns.filterNot(existing.contains)
       val select = ordered
-        .map { name =>
-          SqlFragment(s"${if baseColumns.contains(name) then "c" else "p"}.${quoteIdent(name)}")
+        .map {
+          case "creation_package_id" =>
+            val creation = quoteIdent("creation_package_id")
+            SqlFragment(s"coalesce(c.$creation, c.${quoteIdent("representative_package_id")}) as $creation")
+          case name =>
+            SqlFragment(s"${if baseColumns.contains(name) then "c" else "p"}.${quoteIdent(name)}")
         }
         .mkFragment(sql", ")
       (SqlFragment(s"create or replace view ${quoteIdent(view)} as select ") ++ select ++
         SqlFragment(s""" from ${quoteIdent(base)} p
                        join __rel_contracts c on c.contract_pk = p.contract_pk
-                       where c.created_tx_ix <= latest_ix()
-                         and c.life_ix @> latest_ix()
+                       where c.created_tx_ix <= (select latest_ix())
+                         and c.life_ix @> (select latest_ix())
                          and c.redaction_id is null
                          and not c.divulged_only""")).execute.unit
 

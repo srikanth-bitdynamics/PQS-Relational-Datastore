@@ -48,12 +48,7 @@ private[pqs] object ContractObservations:
             )
           )
         )
-        _ <- sql"""update __rel_contracts c set created_tx_ix = b.tx_ix,
-                     created_at_offset = b.ledger_offset, source_kind = b.source::rel_source_kind,
-                     history_lower_bound = b.lower_bound, creation_synchronizer_id = b.synchronizer
-                   from jsonb_to_recordset($bounds::jsonb) as b(contract_id text, tx_ix bigint,
-                     ledger_offset bigint, source text, lower_bound boolean, synchronizer text)
-                   where c.contract_id = b.contract_id and c.created_tx_ix > b.tx_ix""".update
+        _ <- sql"call __rel_apply_observation_bounds($bounds::jsonb)".execute
         existingIds = existing.toSet
         retained    = observations.filterNot(c => existingIds.contains(c.contractId)).map(_.contractPk.id).toSet
       yield rows.filter {

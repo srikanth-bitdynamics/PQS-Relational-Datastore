@@ -168,6 +168,7 @@ create table __query_projection (
     projection_version    bigint primary key,
     definition            jsonb not null,
     definition_hash       text not null,
+    shape_hash            text not null,
     resolved_shape        jsonb not null,
     layout                smallint not null,
     status                rel_projection_status not null,
@@ -183,7 +184,8 @@ create table __rel_managed_index (
     index_name           text not null,
     definition           text not null,
     columns              text[] not null,
-    opclasses            text[],
+    key_directions       text[],
+    included_columns     text[],
     status               rel_index_status not null,
     adopted              boolean not null default false,
     covered_query_shapes text[],
@@ -200,13 +202,13 @@ create table __rel_encoding (
 );
 
 create table __rel_backfill_progress (
-    projection_version bigint not null references __query_projection (projection_version),
-    qualified          text not null,
-    cursor_tx_ix       bigint not null default -1,
-    cursor_pk          bigint not null default 0,
-    through_ix         bigint not null,
-    completed          boolean not null default false,
-    primary key (projection_version, qualified)
+    shape_hash   text not null,
+    qualified    text not null,
+    cursor_tx_ix bigint not null default -1,
+    cursor_pk    bigint not null default 0,
+    through_ix   bigint not null,
+    completed    boolean not null default false,
+    primary key (shape_hash, qualified)
 );
 
 create table __rel_redaction (

@@ -72,8 +72,7 @@ final case class RelationalPostgres(
       case Datastore.Datasource.TransactionTreeStream => true
       case Datastore.Datasource.TransactionStream     => false
     tx(
-      sql"""update __query_coverage set completed_at = now()
-              where instance_id = current_setting('scribe.instance') and completed_at is null""".update *>
+      sql"update __query_coverage set completed_at = now() where completed_at is null".update *>
         sql"""insert into __query_coverage (
                 instance_id, source_kind, requested_from_offset, actual_from_offset, through_offset, source_pruned_offset,
                 acs_seed_offset, ingested_all_parties, ingested_parties, contract_filter, metadata_filter, tree_stream,
@@ -305,6 +304,7 @@ final case class RelationalPostgres(
           val payload = model.ContractPayload(
             specific.ContractPayload(
               contractPk,
+              txIx,
               codec.template(templateId).fromDynamicValue(templateDv),
               promotedFor(templateId, templateDv)
             ),

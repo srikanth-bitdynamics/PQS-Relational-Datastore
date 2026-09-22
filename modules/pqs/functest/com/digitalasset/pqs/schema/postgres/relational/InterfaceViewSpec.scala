@@ -69,12 +69,12 @@ object InterfaceViewSpec extends SharedLedgerAndPostgresTest:
         FuncTest.retryUntilTimeout(
           (for
             base <- Postgres.query(
-              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'Token' and kind = 'template'"
+              sql"select distinct e.base_table from pqs_relational.__rel_entity e join pqs_relational.__rel_contracts c on c.template_entity_pk = e.pk where e.entity_name = 'Token' and e.kind = 'template'"
                 .query[String]
                 .selectOne
             )
             view <- Postgres.query(
-              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'IAsset' and kind = 'interface'"
+              sql"select distinct i.base_table from pqs_relational.__rel_entity i join pqs_relational.__rel_implements m on m.interface_pk = i.pk join pqs_relational.__rel_contracts c on c.template_entity_pk = m.template_pk where i.entity_name = 'IAsset' and i.kind = 'interface'"
                 .query[String]
                 .selectOne
             )
@@ -85,7 +85,9 @@ object InterfaceViewSpec extends SharedLedgerAndPostgresTest:
                 (select count(*)::text from pqs_relational.__rel_implements i
                    join pqs_relational.__rel_entity t on i.template_pk = t.pk
                    join pqs_relational.__rel_entity f on i.interface_pk = f.pk
-                   where t.entity_name = 'Token' and f.entity_name = 'IAsset') as v
+                   where t.entity_name = 'Token' and f.entity_name = 'IAsset'
+                     and exists (select 1 from pqs_relational.__rel_contracts c
+                                 where c.template_entity_pk = t.pk)) as v
               union all select 'base_rows', (select count(*)::text from pqs_relational.$b)
               union all select 'view_rows', (select count(*)::text from pqs_relational.$v)
               union all select 'payload_label', (select payload_json ->> 'label' from pqs_relational.$b)
@@ -131,12 +133,12 @@ object InterfaceViewSpec extends SharedLedgerAndPostgresTest:
         FuncTest.retryUntilTimeout(
           (for
             base <- Postgres.query(
-              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'Token' and kind = 'template'"
+              sql"select distinct e.base_table from pqs_relational.__rel_entity e join pqs_relational.__rel_contracts c on c.template_entity_pk = e.pk where e.entity_name = 'Token' and e.kind = 'template'"
                 .query[String]
                 .selectOne
             )
             view <- Postgres.query(
-              sql"select base_table from pqs_relational.__rel_entity where entity_name = 'IAsset' and kind = 'interface'"
+              sql"select distinct i.base_table from pqs_relational.__rel_entity i join pqs_relational.__rel_implements m on m.interface_pk = i.pk join pqs_relational.__rel_contracts c on c.template_entity_pk = m.template_pk where i.entity_name = 'IAsset' and i.kind = 'interface'"
                 .query[String]
                 .selectOne
             )

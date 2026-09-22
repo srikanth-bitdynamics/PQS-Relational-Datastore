@@ -58,7 +58,8 @@ object BackfillConcurrencySpec extends FuncTest[Postgres]:
                      (contract_pk, contract_id, template_entity_pk, representative_package_id, created_tx_ix, source_kind)
                      values (1, 'c1', $pk, 'pkg', 1, 'stream'), (2, 'c2', $pk, 'pkg', 2, 'stream')""".update
                 _ <- SqlFragment(
-                  s"""insert into "$table" (contract_pk, payload_json) values (1, '{"status":"C"}'), (2, '{"status":"C"}')"""
+                  s"""insert into "$table" (contract_pk, created_tx_ix, payload_json)
+                      values (1, 1, '{"status":"C"}'), (2, 2, '{"status":"C"}')"""
                 ).update
                 _ <- sql"update __rel_watermark set ledger_offset = 200, tx_ix = 2".update
                 _ <- SqlFragment(

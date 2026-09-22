@@ -2,9 +2,11 @@
 
 The relational backend exposes SQL views. An HTTP Query API and document-to-relational migration tooling are not available.
 
+For initial setup and query examples, see the [relational datastore guide](README.md).
+
 ## Compatible upgrades
 
-Apply the projection, run its resumable backfill, stop ingestion, and activate it. Activation requires backfill through the current published watermark. If ingestion advanced after backfill, catch up before activation. Start ingestion again after activation.
+Stop ingestion, then apply the projection. Apply adds typed columns and requires that no ingest writer is live, so that its schema changes cannot contend with in-flight batches. Backfill is resumable and may run with ingestion restarted. Activation also requires that no ingest writer is live, and requires backfill through the current published watermark. If ingestion advanced after backfill, catch up before activation. Start ingestion again after activation.
 
 Writers and backfills bind the saved projection to the current package dictionary. Appended enum constructors are decoded using the extended case list. Reordered or removed constructors, renamed/repositioned fields, incompatible nullability, and incompatible Daml primitive types are rejected for an active promoted field. Unknown enum ordinals fail explicitly; they are never substituted with SQL NULL. Optional fields absent from older payloads remain nullable.
 
@@ -24,7 +26,7 @@ A breaking public change requires a consumer migration during a maintenance wind
 
 Use `--pipeline-ledger-start=Oldest` for resumable ingestion. On an empty datastore it starts at the ledger's available beginning; on retries it resumes at the published checkpoint. Explicit `Genesis` remains a fixed start request and the existing pipeline validator rejects it once it precedes the datastore's first checkpoint. Changing rights on retry creates a new coverage segment; it does not backfill earlier transactions for newly visible parties.
 
-The writer holds a dedicated liveness connection. Each data transaction verifies that connection's PID and backend start time and holds a shared activity lock through commit. A successor writer, schema apply, and projection activation drain outstanding activity before proceeding. Loss of the liveness connection prevents later stale transactions from committing.
+The writer holds a dedicated liveness connection. Each data transaction verifies that connection's PID and backend start time and holds a shared activity lock through commit. A successor writer, schema apply, projection apply, and projection activation drain outstanding activity before proceeding. Loss of the liveness connection prevents later stale transactions from committing.
 
 ## Managed indexes and database migrations
 

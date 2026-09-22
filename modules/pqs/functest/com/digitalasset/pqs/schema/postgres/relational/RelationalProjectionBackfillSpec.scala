@@ -163,9 +163,13 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
             (firstTx, firstPk) = ordered.headOption.getOrElse((-1L, 0L))
             through <- sql"select tx_ix from latest_checkpoint()".query[Long].selectOne.map(_.getOrElse(0L))
             qualified = s"$pkg:$module:$entity"
+            shapeHash <- sql"select shape_hash from __query_projection where projection_version = $versionNo"
+              .query[String]
+              .selectOne
+              .map(_.getOrElse(""))
             _ <- sql"""insert into __rel_backfill_progress
-                         (projection_version, qualified, cursor_tx_ix, cursor_pk, through_ix, completed)
-                       values ($versionNo, $qualified, $firstTx, $firstPk, $through, false)""".update
+                         (shape_hash, qualified, cursor_tx_ix, cursor_pk, through_ix, completed)
+                       values ($shapeHash, $qualified, $firstTx, $firstPk, $through, false)""".update
             _ <- ProjectionBackfill.run(schema, shapes, versionNo, 1)
             rows <- SqlFragment(
               s"""select p.owner, p."noteBody" from ${base} p
@@ -173,7 +177,7 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
                   order by c.created_tx_ix, p.contract_pk"""
             ).query[(Option[String], Option[String])].selectAll
             done <-
-              sql"select completed from __rel_backfill_progress where projection_version = $versionNo and qualified = $qualified"
+              sql"select completed from __rel_backfill_progress where shape_hash = $shapeHash and qualified = $qualified"
                 .query[Boolean]
                 .selectOne
             encoding <- sql"select numeric_as_string, int64_as_string, exclude_nulls from __rel_encoding"
@@ -308,9 +312,13 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
             (firstTx, firstPk) = ordered.headOption.getOrElse((-1L, 0L))
             through <- sql"select tx_ix from latest_checkpoint()".query[Long].selectOne.map(_.getOrElse(0L))
             qualified = s"$pkg:$module:$entity"
+            shapeHash <- sql"select shape_hash from __query_projection where projection_version = $versionNo"
+              .query[String]
+              .selectOne
+              .map(_.getOrElse(""))
             _ <- sql"""insert into __rel_backfill_progress
-                         (projection_version, qualified, cursor_tx_ix, cursor_pk, through_ix, completed)
-                       values ($versionNo, $qualified, $firstTx, $firstPk, $through, true)""".update
+                         (shape_hash, qualified, cursor_tx_ix, cursor_pk, through_ix, completed)
+                       values ($shapeHash, $qualified, $firstTx, $firstPk, $through, true)""".update
             _ <- ProjectionBackfill.run(schema, shapes, versionNo)
             rows <- SqlFragment(
               s"""select p.owner, p."noteBody" from ${base} p
@@ -318,7 +326,7 @@ object RelationalProjectionBackfillSpec extends SharedLedgerAndPostgresTest:
                   order by c.created_tx_ix, p.contract_pk"""
             ).query[(Option[String], Option[String])].selectAll
             done <-
-              sql"select completed from __rel_backfill_progress where projection_version = $versionNo and qualified = $qualified"
+              sql"select completed from __rel_backfill_progress where shape_hash = $shapeHash and qualified = $qualified"
                 .query[Boolean]
                 .selectOne
           yield rows match

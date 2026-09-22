@@ -18,7 +18,8 @@ object ContractObservationSpec extends FuncTest[Postgres]:
   private val setup = ProductionPool.relationalSchema *> transact(sql"""
     insert into __rel_entity(pk,package_name,module_name,entity_name,kind,base_table)
       values (1,'Test','Main','Asset','template','payload');
-    create table payload(contract_pk bigint primary key references __rel_contracts on delete cascade, payload_json jsonb not null);
+    create table payload(contract_pk bigint primary key references __rel_contracts on delete cascade,
+      created_tx_ix bigint not null, archived_tx_ix bigint, payload_json jsonb not null);
     insert into __rel_transactions(tx_ix,ledger_offset) values (1,10),(2,20),(3,30);
   """.execute)
 
@@ -49,7 +50,7 @@ object ContractObservationSpec extends FuncTest[Postgres]:
           fromAssignment
         )
       ),
-      model.ContractPayload(specific.ContractPayload(id, ujson.Obj("secret" -> "value")), "payload"),
+      model.ContractPayload(specific.ContractPayload(id, ix, ujson.Obj("secret" -> "value")), "payload"),
       model.ContractVisibility(specific.ContractVisibility(id, Party(s"Witness-$ix"), model.VisibilityRole.Witness))
     )
 
@@ -105,7 +106,132 @@ object ContractObservationSpec extends FuncTest[Postgres]:
               .selectAll
           )
           payloads <- transact(sql"select count(*) from payload".query[Long].selectOne)
-        yield assertTrue(actual.toSeq == Seq((1L, 10L, false)), payloads.contains(1L))
+          diverged <- transact(
+            sql"""select count(*) from payload p join __rel_contracts c using (contract_pk)
+                  where p.created_tx_ix is distinct from c.created_tx_ix
+                     or p.archived_tx_ix is distinct from c.archived_tx_ix""".query[Long].selectOne
+          )
+          materialized <- transact(sql"select created_tx_ix from payload".query[Long].selectOne)
+        yield assertTrue(
+          actual.toSeq == Seq((1L, 10L, false)),
+          payloads.contains(1L),
+          materialized.contains(1L),
+          diverged.contains(0L)
+        )
+    },
+    funcTest("archive publication materialises the lifecycle boundary onto the payload row") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup
+          _ <- write(observation(1, 1, model.SourceKind.Stream))
+          _ <- transact(
+            sql"""insert into __rel_tmp_lifecycle(contract_id, archived_tx_ix, archived_at_offset)
+                  values ('contract', 2, 20)""".execute
+          )
+          before <- transact(sql"select archived_tx_ix is null from payload".query[Boolean].selectOne)
+          _      <- transact(sql"update __rel_watermark set tx_ix=2, ledger_offset=20".execute)
+          after <- transact(
+            sql"""select p.archived_tx_ix, c.archived_tx_ix from payload p
+                  join __rel_contracts c using (contract_pk)""".query[(Long, Long)].selectOne
+          )
+        yield assertTrue(before.contains(true), after.contains((2L, 2L)))
+    },
+    funcTest("an assignment-created contract materialises its archive boundary") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup
+          _ <- write(observation(1, 1, model.SourceKind.Assignment))
+          _ <- transact(
+            sql"""insert into __rel_tmp_lifecycle(contract_id, archived_tx_ix, archived_at_offset)
+                  values ('contract', 2, 20)""".execute
+          )
+          _ <- transact(sql"update __rel_watermark set tx_ix=2, ledger_offset=20".execute)
+          actual <- transact(
+            sql"""select p.archived_tx_ix, c.archived_tx_ix from payload p
+                  join __rel_contracts c using (contract_pk)""".query[(Long, Long)].selectOne
+          )
+        yield assertTrue(actual.contains((2L, 2L)))
+    },
+    funcTest("an archive observed before its create materialises once the create arrives") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup
+          _ <- transact(
+            sql"""insert into __rel_tmp_lifecycle(contract_id, archived_tx_ix, archived_at_offset)
+                  values ('contract', 2, 20)""".execute
+          )
+          _      <- transact(sql"update __rel_watermark set tx_ix=2, ledger_offset=20".execute)
+          staged <- transact(sql"select count(*) from __rel_tmp_lifecycle".query[Long].selectOne)
+          _      <- write(observation(1, 1, model.SourceKind.Stream))
+          _      <- transact(sql"update __rel_watermark set tx_ix=3, ledger_offset=30".execute)
+          actual <- transact(
+            sql"""select p.archived_tx_ix, c.archived_tx_ix from payload p
+                  join __rel_contracts c using (contract_pk)""".query[(Long, Long)].selectOne
+          )
+          drained <- transact(sql"select count(*) from __rel_tmp_lifecycle".query[Long].selectOne)
+        yield assertTrue(staged.contains(1L), actual.contains((2L, 2L)), drained.contains(0L))
+    },
+    funcTest("a failed watermark advance leaves canonical and materialised lifecycle unchanged") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup
+          _ <- write(observation(1, 1, model.SourceKind.Stream))
+          _ <- transact(
+            sql"""insert into __rel_tmp_lifecycle(contract_id, archived_tx_ix, archived_at_offset)
+                  values ('contract', 2, 20)""".execute
+          )
+          failed <- transact(
+            sql"update __rel_watermark set tx_ix=2, ledger_offset=20".execute *>
+              ZIO.fail(new RuntimeException("interrupted before commit"))
+          ).either
+          after <- transact(
+            sql"""select (select count(*) from payload where archived_tx_ix is not null),
+                         (select count(*) from __rel_contracts where archived_tx_ix is not null)"""
+              .query[(Long, Long)]
+              .selectOne
+          )
+          _ <- transact(sql"update __rel_watermark set tx_ix=2, ledger_offset=20".execute)
+          recovered <- transact(
+            sql"""select p.archived_tx_ix, c.archived_tx_ix from payload p
+                  join __rel_contracts c using (contract_pk)""".query[(Long, Long)].selectOne
+          )
+        yield assertTrue(failed.isLeft, after.contains((0L, 0L)), recovered.contains((2L, 2L)))
+    },
+    funcTest("recovery resets the materialised archive boundary with the canonical one") {
+      Given:
+        Postgres.database >+> ProductionPool.layer()
+      Then:
+        for
+          _ <- setup
+          _ <- write(observation(1, 1, model.SourceKind.Stream))
+          _ <- transact(
+            sql"""insert into __rel_tmp_lifecycle(contract_id, archived_tx_ix, archived_at_offset)
+                  values ('contract', 3, 30)""".execute
+          )
+          _ <- transact(sql"update __rel_watermark set tx_ix=3, ledger_offset=30".execute)
+          archived <- transact(
+            sql"""select p.archived_tx_ix, c.archived_tx_ix from payload p
+                  join __rel_contracts c using (contract_pk)""".query[(Long, Long)].selectOne
+          )
+          _ <- transact(sql"call __rel_delete_transactions_after(2)".execute)
+          reset <- transact(
+            sql"""select p.archived_tx_ix is null, c.archived_tx_ix is null from payload p
+                  join __rel_contracts c using (contract_pk)""".query[(Boolean, Boolean)].selectOne
+          )
+          diverged <- transact(
+            sql"""select count(*) from payload p join __rel_contracts c using (contract_pk)
+                  where p.created_tx_ix is distinct from c.created_tx_ix
+                     or p.archived_tx_ix is distinct from c.archived_tx_ix""".query[Long].selectOne
+          )
+        yield assertTrue(archived.contains((3L, 3L)), reset.contains((true, true)), diverged.contains(0L))
     },
     funcTest("a delayed exercise cannot restore a redacted contract payload") {
       Given:

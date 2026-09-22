@@ -114,11 +114,11 @@ object RelationalModelSpec extends ZIOSpecDefault:
     test("payload and interface-view rows target the resolved dynamic table name"):
       val f = factory
       val payload =
-        model.ContractPayload(specific.ContractPayload(f.mk, ujson.Str("x")), "rel_asset__asset__asset")
+        model.ContractPayload(specific.ContractPayload(f.mk, 1L, ujson.Str("x")), "rel_asset__asset__asset")
       val view = model.InterfaceView(specific.InterfaceView(f.mk, ujson.Str("v")), "relv_iface__iface__iface")
       assertTrue(
-        payload._sql == "/*7*/ copy rel_asset__asset__asset (contract_pk, payload_json) from stdin",
-        payload._row == "1\t\"x\"",
+        payload._sql == "/*7*/ copy rel_asset__asset__asset (contract_pk, created_tx_ix, payload_json) from stdin",
+        payload._row == "1\t1\t\"x\"",
         view._sql == "/*8*/ copy relv_iface__iface__iface (contract_pk, view_json) from stdin",
         view._row == "2\t\"v\""
       )
