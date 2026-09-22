@@ -54,3 +54,29 @@ create trigger __rel_update_watermark_trg
     on __rel_watermark
     for each row
 execute function __rel_update_watermark_fn();
+
+create or replace view transactions as
+select t.tx_ix,
+       t.ledger_offset,
+       t.transaction_id,
+       t.effective_at,
+       t.synchronizer_id,
+       t.workflow_id,
+       t.external_transaction_hash,
+       t.paid_traffic_cost
+from __rel_transactions t
+where t.ledger_offset between oldest_offset() and latest_offset();
+
+create or replace view active_contracts as
+select c.contract_pk,
+       c.contract_id,
+       c.template_entity_pk,
+       c.representative_package_id,
+       c.created_tx_ix,
+       c.created_at_offset,
+       c.signatories,
+       c.observers,
+       c.creation_synchronizer_id
+from __rel_contracts c
+where c.life_ix @> latest_ix()
+  and not c.divulged_only;

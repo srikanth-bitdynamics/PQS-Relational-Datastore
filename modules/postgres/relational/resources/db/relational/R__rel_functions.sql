@@ -202,6 +202,64 @@ $$
     select pruned_offset from __rel_pruning_metadata;
 $$ language sql stable parallel safe;
 
+create or replace function rel_validate_offset_exists(p_offset bigint) returns bigint as
+$$
+declare
+    first_offset bigint;
+    last_offset  bigint;
+begin
+    select ledger_offset from oldest_checkpoint() into first_offset;
+    select ledger_offset from latest_checkpoint() into last_offset;
+    if first_offset is null or p_offset < first_offset then
+        raise exception 'offset % is below the retained history', p_offset;
+    end if;
+    if last_offset is null or p_offset > last_offset then
+        raise exception 'offset % is beyond the published watermark', p_offset;
+    end if;
+    return p_offset;
+end;
+$$ language plpgsql stable;
+
+create or replace function set_latest(p_offset bigint) returns bigint as
+$$
+    select set_config('pqs.session_offset_latest', rel_validate_offset_exists(p_offset)::text, false);
+    select p_offset;
+$$ language sql stable;
+
+create or replace function set_oldest(p_offset bigint) returns bigint as
+$$
+    select set_config('pqs.session_offset_oldest', rel_validate_offset_exists(p_offset)::text, false);
+    select p_offset;
+$$ language sql stable;
+
+create or replace function latest_offset() returns bigint as
+$$
+    select case
+               when coalesce(current_setting('pqs.session_offset_latest', true), '') = ''
+                   then (select ledger_offset from latest_checkpoint())
+               else current_setting('pqs.session_offset_latest', false)::bigint
+           end;
+$$ language sql stable parallel safe;
+
+create or replace function oldest_offset() returns bigint as
+$$
+    select case
+               when coalesce(current_setting('pqs.session_offset_oldest', true), '') = ''
+                   then (select ledger_offset from oldest_checkpoint())
+               else current_setting('pqs.session_offset_oldest', false)::bigint
+           end;
+$$ language sql stable parallel safe;
+
+create or replace function latest_ix() returns bigint as
+$$
+    select max(tx_ix) from __rel_transactions where ledger_offset <= latest_offset();
+$$ language sql stable parallel safe;
+
+create or replace function oldest_ix() returns bigint as
+$$
+    select min(tx_ix) from __rel_transactions where ledger_offset >= oldest_offset();
+$$ language sql stable parallel safe;
+
 create or replace procedure __rel_delete_transactions_after(cutoff_ix bigint) as
 $$
 declare

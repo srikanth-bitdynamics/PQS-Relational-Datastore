@@ -434,6 +434,32 @@ $$;
 
 
 --
+-- Name: latest_ix(); Type: FUNCTION; Schema: pqs_relational; Owner: -
+--
+
+CREATE FUNCTION pqs_relational.latest_ix() RETURNS bigint
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$
+    select max(tx_ix) from __rel_transactions where ledger_offset <= latest_offset();
+$$;
+
+
+--
+-- Name: latest_offset(); Type: FUNCTION; Schema: pqs_relational; Owner: -
+--
+
+CREATE FUNCTION pqs_relational.latest_offset() RETURNS bigint
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$
+    select case
+               when coalesce(current_setting('pqs.session_offset_latest', true), '') = ''
+                   then (select ledger_offset from latest_checkpoint())
+               else current_setting('pqs.session_offset_latest', false)::bigint
+           end;
+$$;
+
+
+--
 -- Name: oldest_checkpoint(); Type: FUNCTION; Schema: pqs_relational; Owner: -
 --
 
@@ -445,6 +471,32 @@ $$;
 
 
 --
+-- Name: oldest_ix(); Type: FUNCTION; Schema: pqs_relational; Owner: -
+--
+
+CREATE FUNCTION pqs_relational.oldest_ix() RETURNS bigint
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$
+    select min(tx_ix) from __rel_transactions where ledger_offset >= oldest_offset();
+$$;
+
+
+--
+-- Name: oldest_offset(); Type: FUNCTION; Schema: pqs_relational; Owner: -
+--
+
+CREATE FUNCTION pqs_relational.oldest_offset() RETURNS bigint
+    LANGUAGE sql STABLE PARALLEL SAFE
+    AS $$
+    select case
+               when coalesce(current_setting('pqs.session_offset_oldest', true), '') = ''
+                   then (select ledger_offset from oldest_checkpoint())
+               else current_setting('pqs.session_offset_oldest', false)::bigint
+           end;
+$$;
+
+
+--
 -- Name: pruned_offset(); Type: FUNCTION; Schema: pqs_relational; Owner: -
 --
 
@@ -452,6 +504,54 @@ CREATE FUNCTION pqs_relational.pruned_offset() RETURNS bigint
     LANGUAGE sql STABLE PARALLEL SAFE
     AS $$
     select pruned_offset from __rel_pruning_metadata;
+$$;
+
+
+--
+-- Name: rel_validate_offset_exists(bigint); Type: FUNCTION; Schema: pqs_relational; Owner: -
+--
+
+CREATE FUNCTION pqs_relational.rel_validate_offset_exists(p_offset bigint) RETURNS bigint
+    LANGUAGE plpgsql STABLE
+    AS $$
+declare
+    first_offset bigint;
+    last_offset  bigint;
+begin
+    select ledger_offset from oldest_checkpoint() into first_offset;
+    select ledger_offset from latest_checkpoint() into last_offset;
+    if first_offset is null or p_offset < first_offset then
+        raise exception 'offset % is below the retained history', p_offset;
+    end if;
+    if last_offset is null or p_offset > last_offset then
+        raise exception 'offset % is beyond the published watermark', p_offset;
+    end if;
+    return p_offset;
+end;
+$$;
+
+
+--
+-- Name: set_latest(bigint); Type: FUNCTION; Schema: pqs_relational; Owner: -
+--
+
+CREATE FUNCTION pqs_relational.set_latest(p_offset bigint) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+    select set_config('pqs.session_offset_latest', rel_validate_offset_exists(p_offset)::text, false);
+    select p_offset;
+$$;
+
+
+--
+-- Name: set_oldest(bigint); Type: FUNCTION; Schema: pqs_relational; Owner: -
+--
+
+CREATE FUNCTION pqs_relational.set_oldest(p_offset bigint) RETURNS bigint
+    LANGUAGE sql STABLE
+    AS $$
+    select set_config('pqs.session_offset_oldest', rel_validate_offset_exists(p_offset)::text, false);
+    select p_offset;
 $$;
 
 
@@ -839,6 +939,24 @@ CREATE TABLE pqs_relational.__rel_watermark (
 
 
 --
+-- Name: active_contracts; Type: VIEW; Schema: pqs_relational; Owner: -
+--
+
+CREATE VIEW pqs_relational.active_contracts AS
+ SELECT contract_pk,
+    contract_id,
+    template_entity_pk,
+    representative_package_id,
+    created_tx_ix,
+    created_at_offset,
+    signatories,
+    observers,
+    creation_synchronizer_id
+   FROM pqs_relational.__rel_contracts c
+  WHERE ((life_ix @> pqs_relational.latest_ix()) AND (NOT divulged_only));
+
+
+--
 -- Name: flyway_schema_history; Type: TABLE; Schema: pqs_relational; Owner: -
 --
 
@@ -864,6 +982,23 @@ CREATE TABLE pqs_relational.rel_com_digitalasset_pqs_schema_postgres_relation_h4
     contract_pk bigint NOT NULL,
     payload_json jsonb NOT NULL
 );
+
+
+--
+-- Name: transactions; Type: VIEW; Schema: pqs_relational; Owner: -
+--
+
+CREATE VIEW pqs_relational.transactions AS
+ SELECT tx_ix,
+    ledger_offset,
+    transaction_id,
+    effective_at,
+    synchronizer_id,
+    workflow_id,
+    external_transaction_hash,
+    paid_traffic_cost
+   FROM pqs_relational.__rel_transactions t
+  WHERE ((ledger_offset >= pqs_relational.oldest_offset()) AND (ledger_offset <= pqs_relational.latest_offset()));
 
 
 --
