@@ -36,8 +36,7 @@ create table __rel_package (
     pk      bigserial primary key,
     name    text not null,
     version text not null,
-    id      text not null,
-    unique (name, version, id)
+    id      text not null unique
 );
 
 create table __rel_entity (
@@ -46,7 +45,7 @@ create table __rel_entity (
     module_name  text not null,
     entity_name  text not null,
     kind         rel_entity_kind not null,
-    base_table   text,
+    base_table   text unique,
     unique (package_name, module_name, entity_name, kind)
 );
 
@@ -205,7 +204,6 @@ create index __query_events_tx_ix_idx on __query_events (tx_ix);
 create index __query_events_contract_id_idx on __query_events using hash (contract_id);
 create index __query_event_visibility_party_idx on __query_event_visibility (party, event_pk);
 create index __rel_contract_visibility_party_idx on __rel_contract_visibility (party, contract_pk);
-create index __rel_exercises_contract_idx on __rel_exercises using hash (event_pk);
 create index __rel_tmp_lifecycle_ix_idx on __rel_tmp_lifecycle (archived_tx_ix);
 create unique index __query_projection_live_hash_idx on __query_projection (definition_hash) where status <> 'retired';
 create unique index __query_projection_active_idx on __query_projection ((true)) where status = 'active';

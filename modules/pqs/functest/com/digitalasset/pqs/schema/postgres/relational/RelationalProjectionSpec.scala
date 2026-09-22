@@ -40,7 +40,7 @@ object RelationalProjectionSpec extends SharedLedgerAndPostgresTest:
       .selectOne
 
   def spec = suite("relational projection apply spec")(
-    funcTest("adds nullable typed columns, is idempotent, and rejects an incompatible type change") {
+    funcTest("adds typed columns, is idempotent, rejects a type change, and fails closed on an unknown template") {
       val alice = Party("Alice")
       Given:
         DamlSdk.dar(note) ++ DamlSdk.parties(alice) ++ Postgres.database >+> DamlSdk.deploy
@@ -119,7 +119,28 @@ object RelationalProjectionSpec extends SharedLedgerAndPostgresTest:
               )
             yield assertTrue(scale == Some(10), rejected.isEmpty)
           )
-        yield ownerResult && assertTrue(conflict.isFailure) && rollback
+          draftsBefore <- Postgres.query(
+            sql"set search_path to pqs_relational".execute *>
+              sql"select count(*) from __query_projection".query[Long].selectOne
+          )
+          failClosed <- Postgres
+            .query(
+              sql"set search_path to pqs_relational".execute *>
+                ProjectionApply.apply(
+                  Map("typo" -> ProjectionDefinition(Seq(s"$pkg:$module:Ghost"), Seq("owner"))),
+                  schemaFor(pkg, module, name, Seq("owner" -> Descriptor.party))
+                )
+            )
+            .exit
+          draftsAfter <- Postgres.query(
+            sql"set search_path to pqs_relational".execute *>
+              sql"select count(*) from __query_projection".query[Long].selectOne
+          )
+        yield ownerResult && assertTrue(
+          conflict.isFailure,
+          failClosed.isFailure,
+          draftsBefore == draftsAfter
+        ) && rollback
     },
     funcTest("rejects a promoted column whose name exceeds the 63-byte identifier limit") {
       val alice = Party("Alice")

@@ -32,5 +32,31 @@ object ProjectionBindingSpec extends ZIOSpecDefault:
     ,
     test("an empty document binds no shapes"):
       assertTrue(ProjectionBinding.parse("{}").isEmpty)
+    ,
+    test("unions the columns of two named groups that target the same template, deduped by position"):
+      val twoGroups =
+        """{"primary":{"Finance:Main:Asset":[
+             {"name":"owner","type":"text","nullable":false,"position":0},
+             {"name":"amount","type":"numeric(38, 10)","nullable":false,"position":1}
+           ]},
+           "secondary":{"Finance:Main:Asset":[
+             {"name":"owner","type":"text","nullable":false,"position":0},
+             {"name":"status","type":"text","nullable":false,"position":2,"enum":["A","B"]}
+           ]}}"""
+      val shape = ProjectionBinding.parse(twoGroups)("Finance:Main:Asset")
+      assertTrue(
+        shape.unionFieldCount == 3,
+        shape.promoted.map(f => (f.name, f.pgType.sql, f.position)) == Seq(
+          ("owner", "text", 0),
+          ("amount", "numeric(38, 10)", 1),
+          ("status", "text", 2)
+        )
+      )
+    ,
+    test("rejects two groups that define conflicting columns at the same position"):
+      val conflicting =
+        """{"a":{"Finance:Main:Asset":[{"name":"owner","type":"text","nullable":false,"position":0}]},
+           "b":{"Finance:Main:Asset":[{"name":"amount","type":"bigint","nullable":false,"position":0}]}}"""
+      assertTrue(scala.util.Try(ProjectionBinding.parse(conflicting)).isFailure)
   )
 end ProjectionBindingSpec

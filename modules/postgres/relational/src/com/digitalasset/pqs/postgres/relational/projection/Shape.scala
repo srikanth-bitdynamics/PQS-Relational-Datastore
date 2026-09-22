@@ -78,22 +78,34 @@ object Shape:
       case o: Descriptor.Optional => primitive(o.value).map((pg, ec) => (pg, true, ec))
       case other                  => primitive(other).map((pg, ec) => (pg, false, ec))
 
+  private def unionEnumCases(sets: Seq[Seq[String]]): Option[Option[Seq[String]]] =
+    sets.maxByOption(_.size) match
+      case None => Some(None)
+      case Some(longest) =>
+        if sets.forall(s => longest.take(s.size).sameElements(s)) then Some(Some(longest)) else None
+
   private def resolveLineage(lineage: Lineage, versions: Seq[Template[Descriptor]]): ResolvedShape =
     val perVersion = versions.sortBy(_.templateId).map(t => fieldsOf(t.payload))
     val union      = perVersion.maxByOption(_.size).getOrElse(Seq.empty)
     val resolved = union.zipWithIndex.map { (field, i) =>
-      val (name, desc) = field
-      val present      = perVersion.filter(_.size > i).map(_(i))
-      val consistent   = present.map(_._1).distinct.size <= 1 && present.map((_, d) => classify(d)).distinct.size <= 1
-      if !consistent then
+      val (name, _)  = field
+      val present    = perVersion.filter(_.size > i).map(_(i))
+      val namesOk    = present.map(_._1).distinct.size <= 1
+      val classified = present.map((_, d) => classify(d))
+      val typeShapes = classified.map(_.map((pg, nullable, _) => (pg, nullable))).distinct
+      val enumUnion  = unionEnumCases(classified.flatMap(_.flatMap(_._3)))
+      val diverges =
         (
           Left(name),
           Some(s"field '$name' at position $i diverges across versions of ${lineage.qualified}; kept in JSON")
         )
-      else
-        classify(desc) match
-          case Some((pg, nullable, enumCases)) => (Right(PromotedField(name, pg, nullable, i, enumCases)), None)
-          case None                            => (Left(name), None)
+      (namesOk, typeShapes, enumUnion) match
+        case (true, Seq(Some((pg, nullable))), Some(enumCases)) =>
+          (Right(PromotedField(name, pg, nullable, i, enumCases)), None)
+        case (true, Seq(None), _) =>
+          (Left(name), None)
+        case _ =>
+          diverges
     }
     ResolvedShape(
       lineage,

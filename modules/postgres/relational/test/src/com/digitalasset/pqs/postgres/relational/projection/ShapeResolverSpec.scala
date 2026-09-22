@@ -61,5 +61,32 @@ object ShapeResolverSpec extends ZIOSpecDefault:
       val shape =
         Shape.resolveAll(Dictionary.make(iface))(Shape.Lineage("Finance", "Main", "IAsset", Shape.EntityKind.Interface))
       assertTrue(shape.promoted.map(_.name) == Seq("owner"))
+    ,
+    test("an enum that appends a case across versions stays promoted with the unioned case list"):
+      def status(cases: Seq[String]) =
+        Descriptor.constructor(id("e1", "1.0.0", "Status"), Descriptor.enumeration(cases))
+      val v1 = tmpl(id("p1", "1.0.0", "Order"), Seq("status" -> status(Seq("Open", "Closed"))))
+      val v2 = tmpl(id("p2", "2.0.0", "Order"), Seq("status" -> status(Seq("Open", "Closed", "Paused"))))
+      val shape =
+        Shape.resolveAll(Dictionary.make(v1, v2))(Shape.Lineage("Finance", "Main", "Order", Shape.EntityKind.Template))
+      assertTrue(
+        shape.jsonOnly.isEmpty,
+        shape.diagnostics.isEmpty,
+        shape.promoted.map(f => (f.name, f.pgType.sql, f.nullable)) == Seq(("status", "text", false)),
+        shape.promoted.head.enumCases == Some(Seq("Open", "Closed", "Paused"))
+      )
+    ,
+    test("an enum whose cases are reordered across versions diverges and stays JSON"):
+      def status(cases: Seq[String]) =
+        Descriptor.constructor(id("e1", "1.0.0", "Status"), Descriptor.enumeration(cases))
+      val v1 = tmpl(id("p1", "1.0.0", "Order"), Seq("status" -> status(Seq("Open", "Closed"))))
+      val v2 = tmpl(id("p2", "2.0.0", "Order"), Seq("status" -> status(Seq("Closed", "Open"))))
+      val shape =
+        Shape.resolveAll(Dictionary.make(v1, v2))(Shape.Lineage("Finance", "Main", "Order", Shape.EntityKind.Template))
+      assertTrue(
+        shape.promoted.isEmpty,
+        shape.jsonOnly == Seq("status"),
+        shape.diagnostics.exists(_.contains("diverges"))
+      )
   )
 end ShapeResolverSpec

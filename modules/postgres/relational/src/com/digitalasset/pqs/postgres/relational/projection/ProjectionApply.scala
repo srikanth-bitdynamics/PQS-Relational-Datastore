@@ -13,7 +13,8 @@ object ProjectionApply:
       resolvedShape: Value,
       hash: String,
       columns: Seq[PlannedColumn],
-      diagnostics: Seq[String]
+      diagnostics: Seq[String],
+      errors: Seq[String]
   )
 
   enum Outcome:
@@ -32,7 +33,7 @@ object ProjectionApply:
       val resolved = definition.templates.map { template =>
         byQualified.get(template) match
           case None =>
-            (None, Seq(s"projection '$name': template '$template' not found on the ledger; skipped"))
+            (Option.empty[(Shape.Lineage, Seq[Shape.PromotedField])], Seq.empty[String])
           case Some(shape) =>
             val columns   = shape.promoted.filter(f => promoteSet.contains(f.name))
             val available = shape.promoted.map(_.name).toSet
@@ -48,7 +49,12 @@ object ProjectionApply:
     val columns = perProjection.flatMap((_, resolved) =>
       resolved.flatMap(_._1).flatMap((lineage, cols) => cols.map(PlannedColumn(lineage, _)))
     )
-    val diagnostics   = perProjection.flatMap((_, resolved) => resolved.flatMap(_._2))
+    val diagnostics = perProjection.flatMap((_, resolved) => resolved.flatMap(_._2))
+    val errors = canonicalConfig.toSeq.sortBy(_._1).flatMap { (name, definition) =>
+      definition.templates
+        .filterNot(byQualified.contains)
+        .map(template => s"projection '$name': template '$template' not found on the ledger")
+    }
     val resolvedShape = shapeJson(perProjection)
     val definition    = ProjectionDefinition.toJson(config)
     val hashInput = ujson.Obj(
@@ -57,21 +63,22 @@ object ProjectionApply:
       "layout"     -> ujson.Num(layout)
     )
     val hash = ProjectionDefinition.canonicalHash(hashInput)
-    Plan(definition, resolvedShape, hash, columns, diagnostics)
+    Plan(definition, resolvedShape, hash, columns, diagnostics, errors)
 
   def apply(config: Map[String, ProjectionDefinition], schema: Schema): ZIO[ZConnection, Throwable, Outcome] =
     val p = plan(config, schema)
-    sql"select 1 from pg_advisory_xact_lock(${projectionLockKey})".query[Int].selectOne *>
-      ProjectionRegistry.getByHash(p.hash).flatMap {
-        case Some(row) => ZIO.succeed(Outcome.AlreadyApplied(row.version, p.diagnostics))
-        case None =>
-          ZIO.foreachDiscard(p.columns)(promoteColumn) *>
-            ProjectionRegistry
-              .insertDraft(p.definition, p.hash, p.resolvedShape, layout)
-              .map(version => Outcome.Applied(version, p.columns.size, p.diagnostics))
-      }
-
-  private val projectionLockKey = 0x70716a5f70726f6aL
+    if p.errors.nonEmpty then ZIO.fail(new RuntimeException(s"projection apply failed: ${p.errors.mkString("; ")}"))
+    else
+      sql"select 1 from pg_advisory_xact_lock(${ProjectionRegistry.projectionLockKey})".query[Int].selectOne *>
+        ProjectionRegistry.getByHash(p.hash).flatMap {
+          case Some(row) => ZIO.succeed(Outcome.AlreadyApplied(row.version, p.diagnostics))
+          case None =>
+            ProjectionRegistry.retireDrafts *>
+              ZIO.foreachDiscard(p.columns)(promoteColumn) *>
+              ProjectionRegistry
+                .insertDraft(p.definition, p.hash, p.resolvedShape, layout)
+                .map(version => Outcome.Applied(version, p.columns.size, p.diagnostics))
+        }
 
   def render(outcome: Outcome): String =
     val (headline, diagnostics) = outcome match

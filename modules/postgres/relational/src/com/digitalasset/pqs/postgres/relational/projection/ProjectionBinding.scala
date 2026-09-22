@@ -18,8 +18,19 @@ object ProjectionBinding:
       .obj
       .values
       .flatMap(_.obj)
-      .map((qualified, cols) => qualified -> toShape(qualified, cols.arr.map(fieldOf).toSeq))
-      .toMap
+      .map((qualified, cols) => qualified -> cols.arr.map(fieldOf).toSeq)
+      .groupMapReduce(_._1)(_._2)(_ ++ _)
+      .map((qualified, fields) => qualified -> toShape(qualified, reconcile(qualified, fields)))
+
+  private def reconcile(qualified: String, fields: Seq[Shape.PromotedField]): Seq[Shape.PromotedField] =
+    fields.groupBy(_.position).toSeq.sortBy(_._1).map { (position, group) =>
+      group.distinctBy(f => (f.name, f.pgType.sql, f.nullable, f.enumCases)) match
+        case Seq(field) => field
+        case _ =>
+          throw new RuntimeException(
+            s"projection binding for $qualified has conflicting definitions at position $position"
+          )
+    }
 
   private def fieldOf(v: Value): Shape.PromotedField =
     Shape.PromotedField(

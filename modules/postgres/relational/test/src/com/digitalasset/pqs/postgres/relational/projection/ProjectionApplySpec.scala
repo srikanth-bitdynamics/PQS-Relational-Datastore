@@ -36,7 +36,7 @@ object ProjectionApplySpec extends ZIOSpecDefault:
         plan.hash != ProjectionApply.plan(config, assetSchema(12)).hash
       )
     ,
-    test("emits diagnostics for an unknown template and a non-promotable field"):
+    test("errors on an unknown template and diagnoses a non-promotable field"):
       val config = Map(
         "asset"   -> ProjectionDefinition(Seq("Finance:Main:Asset"), Seq("owner", "tags")),
         "missing" -> ProjectionDefinition(Seq("Finance:Main:Ghost"), Seq("owner"))
@@ -45,7 +45,7 @@ object ProjectionApplySpec extends ZIOSpecDefault:
       assertTrue(
         plan.columns.map(_.field.name) == Seq("owner"),
         plan.diagnostics.exists(_.contains("'tags'")),
-        plan.diagnostics.exists(_.contains("Finance:Main:Ghost"))
+        plan.errors.exists(_.contains("Finance:Main:Ghost"))
       )
   )
 end ProjectionApplySpec

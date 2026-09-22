@@ -505,7 +505,7 @@ object RelationalPostgres:
                   coalesce((select max(event_pk) from __query_events), 0),
                   coalesce((select max(contract_pk) from __rel_contracts), 0))""".query[Long].selectOne.someOrElse(0L)
         }
-        placeholders = IdPlaceholder.factory(lastId + 1)
+        placeholders = IdPlaceholder.factory(lastId)
 
         projectionShapes <- transaction(ProjectionBinding.activeShapes)
         _                <- logInfo(s"Bound ${projectionShapes.size} active projection shape(s)")

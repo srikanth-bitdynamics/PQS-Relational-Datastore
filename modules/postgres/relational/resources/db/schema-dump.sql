@@ -296,14 +296,16 @@ CREATE PROCEDURE pqs_relational.__rel_initialize_package(IN package_name text, I
     LANGUAGE plpgsql
     AS $$
 declare
-    pkg bigint;
+    existing_name    text;
+    existing_version text;
 begin
-    select pk from __rel_package pkgs
-    where pkgs.name = package_name and pkgs.version = package_version and pkgs.id = package_id
-    into pkg;
-    if pkg is null then
-        insert into __rel_package(name, version, id) values (package_name, package_version, package_id)
-        on conflict (name, version, id) do nothing;
+    insert into __rel_package(name, version, id) values (package_name, package_version, package_id)
+    on conflict (id) do nothing;
+    select name, version from __rel_package pkgs where pkgs.id = package_id
+    into existing_name, existing_version;
+    if existing_name is distinct from package_name or existing_version is distinct from package_version then
+        raise exception 'package id % is registered as %:% but was reinitialised as %:%',
+            package_id, existing_name, existing_version, package_name, package_version;
     end if;
 end;
 $$;
@@ -1124,6 +1126,14 @@ ALTER TABLE ONLY pqs_relational.__rel_contracts
 
 
 --
+-- Name: __rel_entity __rel_entity_base_table_key; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
+--
+
+ALTER TABLE ONLY pqs_relational.__rel_entity
+    ADD CONSTRAINT __rel_entity_base_table_key UNIQUE (base_table);
+
+
+--
 -- Name: __rel_entity __rel_entity_package_name_module_name_entity_name_kind_key; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
 --
 
@@ -1164,11 +1174,11 @@ ALTER TABLE ONLY pqs_relational.__rel_managed_index
 
 
 --
--- Name: __rel_package __rel_package_name_version_id_key; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
+-- Name: __rel_package __rel_package_id_key; Type: CONSTRAINT; Schema: pqs_relational; Owner: -
 --
 
 ALTER TABLE ONLY pqs_relational.__rel_package
-    ADD CONSTRAINT __rel_package_name_version_id_key UNIQUE (name, version, id);
+    ADD CONSTRAINT __rel_package_id_key UNIQUE (id);
 
 
 --
@@ -1296,13 +1306,6 @@ CREATE INDEX __rel_contracts_life_idx ON pqs_relational.__rel_contracts USING gi
 --
 
 CREATE INDEX __rel_contracts_template_created_idx ON pqs_relational.__rel_contracts USING btree (template_entity_pk, created_tx_ix DESC, contract_pk DESC);
-
-
---
--- Name: __rel_exercises_contract_idx; Type: INDEX; Schema: pqs_relational; Owner: -
---
-
-CREATE INDEX __rel_exercises_contract_idx ON pqs_relational.__rel_exercises USING hash (event_pk);
 
 
 --

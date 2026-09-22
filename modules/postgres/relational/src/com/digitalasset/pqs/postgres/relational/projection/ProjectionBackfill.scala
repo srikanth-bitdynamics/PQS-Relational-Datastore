@@ -30,7 +30,12 @@ object ProjectionBackfill:
         .query[String]
         .selectOne
         .flatMap {
-          case None => ZIO.unit
+          case None =>
+            ZIO.fail(
+              new RuntimeException(
+                s"relational entity ${l.packageName}:${l.moduleName}:${l.entityName} (template) is not initialized; cannot backfill"
+              )
+            )
           case Some(tbl) =>
             val select = SqlFragment(
               s"""select p.contract_pk, pkg.id, pkg.name, pkg.version, p.payload_json::text
@@ -63,7 +68,9 @@ object ProjectionBackfill:
     val values = shape.promoted.map(_.name).zip(TypedRowCodec.extract(shape, dv))
     val assigns =
       values.map((name, value) => SqlFragment(quoteIdent(name)) ++ sql" = " ++ bind(value)).mkFragment(sql", ")
-    (SqlFragment(s"update ${tbl} set ") ++ assigns ++ sql" where contract_pk = $contractPk").update.unit
+    (SqlFragment(s"update ${tbl} p set ") ++ assigns ++
+      SqlFragment(" from __rel_contracts c where p.contract_pk = ") ++ sql"$contractPk" ++
+      SqlFragment(" and c.contract_pk = p.contract_pk and c.redaction_id is null")).update.unit
 
   private def bind(value: TypedRowCodec.SqlValue): SqlFragment =
     value match

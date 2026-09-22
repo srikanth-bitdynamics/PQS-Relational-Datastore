@@ -50,6 +50,39 @@ object ProjectionRegistrySpec extends SharedLedgerAndPostgresTest:
             one.map(r => ProjectionDefinition.fromJson(r.definition)) == Some(projections)
           )
         )
+    },
+    funcTest("reinitialising a package id with a different name or version is rejected") {
+      val alice = Party("Alice")
+      Given:
+        DamlSdk.dar(note) ++ DamlSdk.parties(alice) ++ Postgres.database >+> DamlSdk.deploy
+      And:
+        Pqs.runRelationalPipeline(
+          "--pipeline-datasource=TransactionTreeStream",
+          "--pipeline-ledger-start=Genesis",
+          "--pipeline-ledger-stop=Latest",
+          "--pipeline-filter-contracts=*"
+        )
+      Then:
+        def initialize(name: String, version: String, id: String) =
+          Postgres.query(
+            sql"set search_path to pqs_relational".execute *>
+              sql"call __rel_initialize_package($name, $version, $id)".execute.either
+          )
+        for
+          pkg <- Postgres.query(
+            sql"set search_path to pqs_relational".execute *>
+              sql"select id, name, version from __rel_package limit 1".query[(String, String, String)].selectOne
+          )
+          (id, name, version) = pkg.getOrElse(("", "", ""))
+          same         <- initialize(name, version, id)
+          wrongName    <- initialize("WrongName", version, id)
+          wrongVersion <- initialize(name, "99.99.99", id)
+        yield assertTrue(
+          pkg.isDefined,
+          same.isRight,
+          wrongName.isLeft,
+          wrongVersion.isLeft
+        )
     }
   )
 end ProjectionRegistrySpec
